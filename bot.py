@@ -406,6 +406,7 @@ class Bot:
 def run():
     pending = b""
     bot = None
+    last_tick = -1
     while True:
         chunk = os.read(0, 65536)
         if not chunk:
@@ -427,10 +428,14 @@ def run():
                 return
             if msg["type"] == "hello":
                 bot = Bot(msg)
+                last_tick = -1
+                latest = None
                 print('{"type":"ready","name":"Eagle Eye"}', flush=True)
-            elif msg["type"] == "obs":
-                latest = msg
+            elif msg["type"] == "obs" and msg["tick"] > last_tick:
+                if latest is None or msg["tick"] > latest["tick"]:
+                    latest = msg
         if latest is not None:
+            last_tick = latest["tick"]
             print(json.dumps(bot.act(latest), allow_nan=False, separators=(",", ":")), flush=True)
 
 
