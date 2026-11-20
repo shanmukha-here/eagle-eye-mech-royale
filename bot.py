@@ -26,8 +26,11 @@ class Bot:
         self.plan_at = -1
         self.goal = (0, 0)
         self.mode = ""
-        self.last_pressure = -100
         self.last_contact = -100
+        self.last_drone = (-1, -100)
+        self.damage_window = []
+        self.recover_until = -100
+        self.other_fight = (frozenset(), -100)
         self.last_bearing = 0
         self.last_probe = None
         self.sprinting = False
@@ -90,24 +93,39 @@ class Bot:
         closest = threats[0][0]["pos"] if threats else pos
         goals = []
 
-        def add(px, py, mode, bonus, must_fit=False):
+        def add(px, py, mode, bonus, must_fit=False, detour=False):
             gap = math.hypot(px-cx, py-cy)-safe_radius
             if must_fit and gap > 0:
                 return
+            distance = math.hypot(px-x, py-y)
+            penalty = max(0, gap)*1.4
+            actual_gap = math.hypot(px-cx, py-cy)-radius
+            if detour and actual_gap <= 0:
+                penalty *= 0.3
+            if detour and actual_gap > 0:
+                # During a hold we can collect nearby loot before moving inward.
+                spare = zone["shrink_start"] - obs["t"]
+                travel = (distance+gap)*1.5 / me["stats"]["walk_speed"]
+                if (travel+6 > spare or
+                        math.dist(zone["center"], (px, py)) > zone["radius"]-4):
+                    return
+                penalty = 0
             cell = self.arena.cell(px, py)
             if cell is None or self.arena.clearance[cell] < me["stats"]["radius"] + 2.1:
                 return
-            distance = math.hypot(px-x, py-y)
-            # A strong penalty for destinations outside the upcoming circle.
-            score = bonus - distance*0.22 - max(0, gap)*1.4
+            score = bonus - distance*0.22 - penalty
             room = self.arena.clearance[cell]
             score += max(0, 1-abs(room-10)/18)*5
             if retreat:
                 point = (px, py, self.arena.floor[cell]+me["stats"]["muzzle_height"])
+                blocked = False
                 for m, _, line in threats[:3]:
                     mx, my, mz = m["pos"]
                     if line and not self.arena.line_open((mx, my, mz+self._actor_center(m)), point):
                         score += 25
+                        blocked = True
+                if blocked:
+                    mode = "cover"
                 score += min(100, math.hypot(px-closest[0], py-closest[1])) * 0.12
             if self.mode == mode and math.dist((px, py), self.goal) < 9:
                 score += 4
@@ -135,17 +153,53 @@ class Bot:
                     continue
                 if abs(point[2]-pos[2]) > 12 or math.dist(pos, point) > 105:
                     continue
-                add(point[0], point[1], kind, values[kind]-0.7*(obs["t"]-seen), True)
+                if any(clear and math.dist(m["pos"][:2], point[:2]) < 32
+                       for m, _, clear in threats[:3]):
+                    continue
+                add(point[0], point[1], kind, values[kind]-0.7*(obs["t"]-seen), detour=True)
             for d in obs.get("drops", ()):
-                hp = me["hp"]/me["max_hp"]
-                if d["lands_in"] <= 5 and d.get("holder") in (None, me["id"]):
-                    bonus = 54 if hp < 0.85 else 37
-                    add(*d["pos"][:2], "drop", bonus, True)
+                point = d["pos"][:2]
+                eta = math.dist(pos[:2], point) * 1.35 / me["stats"]["walk_speed"]
+                if d["lands_in"] > eta+3 or d.get("holder") not in (None, me["id"]):
+                    continue
+                if any(math.dist(m["pos"][:2], point) < d["radius"]+16 for m, _, _ in threats):
+                    continue
+                missing = max(0, 1-me["hp"]/me["max_hp"])
+                bonus = 46 + 70*missing + 3*d["progress"]
+                add(*point, "drop", bonus, detour=True)
         if goals:
             _, gx, gy, self.mode = max(goals)
             self.goal = (gx, gy)
         else:
             self.goal, self.mode = (cx, cy), "zone"
+
+    def _can_recover_in_view(self, obs, threats):
+        # A visible beam ending on another mech is evidence of a separate fight.
+        # Only sit it out while wounded and while both opponents face elsewhere.
+        t, me = obs["t"], obs["self"]
+        if obs["alive"] <= 3 or me["hp"] >= 0.90*me["max_hp"] or self.damage_window:
+            return False
+        nearby = [m for m, distance, clear in threats if clear]
+        if len(nearby) < 2:
+            return False
+        for m, distance, clear in threats:
+            if not clear:
+                continue
+            dx, dy = me["pos"][0]-m["pos"][0], me["pos"][1]-m["pos"][1]
+            if distance < 55 or abs(angle_delta(math.atan2(dy, dx), m["aim"][0])) < 0.57:
+                return False
+        ids = {m["id"] for m in nearby}
+        for beam in obs["beams"]:
+            if beam["by"] not in ids or not beam["path"]:
+                continue
+            end = beam["path"][-1]
+            for m in nearby:
+                if (m["id"] != beam["by"] and math.dist(end[:2], m["pos"][:2]) < 6
+                        and m["pos"][2]-1 <= end[2] <= m["pos"][2]+2*self._actor_center(m)+1):
+                    self.other_fight = (frozenset((beam["by"], m["id"])), t+1.25)
+                    return True
+        pair, expires = self.other_fight
+        return t < expires and pair <= ids
 
     def _loadout(self, obs, act):
         me = obs["self"]
@@ -168,6 +222,8 @@ class Bot:
     def _target(self, obs, threats, npcs, urgent):
         me = obs["self"]
         live = [(m, d) for m, d, clear in threats if clear]
+        if self.mode == "heal":
+            return None, 0
         if live:
             def priority(pair):
                 m, d = pair
@@ -175,7 +231,11 @@ class Bot:
                 return d*0.5 + min(1, hp/max(1, m.get("max_hp", self.cfg["mech"]["hp"])))*34
             m, _ = min(live, key=priority)
             return m, self._actor_center(m)
-        if self.mode == "heal" or urgent or me["hp"] < me["max_hp"]*0.68 or obs["t"] - self.last_contact < 3:
+        if not urgent:
+            for drone in npcs:
+                if drone["id"] == self.last_drone[0] and obs["t"]-self.last_drone[1] < 2:
+                    return drone, self._actor_center(drone)
+        if urgent or me["hp"] < me["max_hp"]*0.68 or obs["t"] - self.last_contact < 3:
             return None, 0
         if npcs:
             return npcs[0], self._actor_center(npcs[0])
@@ -278,6 +338,14 @@ class Bot:
         weight = 0 if not live else (0.28 if urgent else 1.6)
         if self.mode == "cover" and not endpoint:
             weight = 0.45
+        if self.mode == "drop" and not urgent and not pressured:
+            # Stay in the capture ring. A full repair needs four continuous seconds.
+            for d in obs.get("drops", ()):
+                if (d["lands_in"] == 0 and math.dist(self.goal, d["pos"][:2]) < 1
+                        and goal_dist <= d["radius"]):
+                    if goal_dist > d["radius"]*0.45:
+                        return direct, False, False
+                    return (0, 0), False, False
         if zone["radius"] <= 5 and zone["next_radius"] == 0:
             weight = 0
         path_scale = 0.0 if endpoint else 1.0
@@ -355,22 +423,37 @@ class Bot:
         threats, npcs = self._visible_contacts(obs)
         live = [m for m, _, clear in threats if clear]
         hits = [e for e in obs["events"] if e["type"] == "damaged" and e.get("bearing") is not None]
-        if hits or live:
+        attackers = [e for e in hits if e["weapon"] != "npc"]
+        for e in hits:
+            if e["weapon"] == "npc":
+                self.last_drone = (e.get("by"), t)
+            else:
+                self.damage_window.append((t, e["amount"]))
+        self.damage_window = [(when, amount) for when, amount in self.damage_window if t-when < 2.5]
+        if attackers or live:
             self.last_contact = t
-            if hits:
-                self.last_bearing = hits[-1]["bearing"]
+            if attackers:
+                self.last_bearing = attackers[-1]["bearing"]
             else:
                 self.last_bearing = math.atan2(live[0]["pos"][1]-p[1], live[0]["pos"][0]-p[0])
-        pressured = len(live) >= 2 or me["hp"] < me["max_hp"]*0.57
-        if pressured and (hits or live):
-            self.last_pressure = t
+        hp_fraction = me["hp"]/me["max_hp"]
+        burst = sum(amount for _, amount in self.damage_window) / me["max_hp"]
+        pressured = len(live) >= 2 or hp_fraction < 0.57 or (hp_fraction < 0.88 and burst > 0.19)
+        if me["in_zone"] and hp_fraction < 0.88 and (attackers or (pressured and live)):
+            missing = max(0, 0.93*me["max_hp"] - me["hp"])
+            self.recover_until = t + me["stats"]["regen_delay"] + missing/max(1, me["stats"]["regen_per_s"]) + 1
         outside_next = math.dist(p[:2], zone["next_center"]) - zone["next_radius"]
         time_left = zone["shrink_end"]-t
         urgent = (not me["in_zone"] or (outside_next > 0 and
                   outside_next*1.45/me["stats"]["walk_speed"] + 6 >= time_left))
         state = (zone["next_radius"], pressured, urgent, bool(live))
-        healing = (not live and not urgent and me["in_zone"] and outside_next < -4
-                   and me["hp"] < me["max_hp"]*0.86 and t-self.last_pressure < 12)
+        separate_fight = self._can_recover_in_view(obs, threats) if live else False
+        healing = ((not live or separate_fight) and not urgent and me["in_zone"] and outside_next < -4
+                   and hp_fraction < 0.93 and (t < self.recover_until or separate_fight)
+                   and t-self.last_drone[1] > 2)
+        # Prefer a safe, ongoing capture to a slower natural repair.
+        if healing and any(d.get("holder") == me["id"] for d in obs.get("drops", ())):
+            healing = False
         state = (*state, healing)
         if healing:
             self.goal, self.mode = tuple(p[:2]), "heal"
@@ -388,7 +471,10 @@ class Bot:
             else:
                 self.blocked_count = 0
             self.last_probe = (t, tuple(p))
-        move, boost, jump = self._move(obs, threats, urgent, pressured)
+        if healing:
+            move, boost, jump = (0, 0), False, False
+        else:
+            move, boost, jump = self._move(obs, threats, urgent, pressured)
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
