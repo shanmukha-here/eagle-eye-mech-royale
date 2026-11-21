@@ -119,3 +119,37 @@ def scripted(g, p):
                 a["jump"] = s["grounded"]
                 a["boost"] = not s["grounded"]
     return a
+
+# Frozen independent qualifying-field proxy. Roles are randomly assigned to spawn slots.
+QUALIFIERS = (
+    "starter", "phase1", "phase2", "phase3", "phase4", "phase5",
+    "hunter", "hunter", "hunter", "equipment", "circle",
+    "laser_scout", "cube_farmer", "cube_farmer", "ring_camper",
+)
+
+
+def qualifying_controller(role, incumbent):
+    """Exhibition-inspired styles. Every decision uses the actor's own observation."""
+    class Competitor(incumbent):
+        def _choose_goal(self, obs, threats, pressured, urgent):
+            super()._choose_goal(obs, threats, pressured, urgent)
+            if urgent:
+                return
+            me, zone = obs["self"], obs["zone"]
+            pos = me["pos"]
+            if role == "ring_camper":
+                if math.dist(pos[:2], zone["next_center"]) < max(0, zone["next_radius"] - 15):
+                    self.goal, self.mode = tuple(pos[:2]), "hold"
+                return
+            if role == "laser_scout" and me["weapons"][1]:
+                return
+            items = obs["pickups"] if role == "laser_scout" else obs["cubes"] or obs["crates"]
+            viable = [i for i in items if (role != "laser_scout" or i["kind"] == "laser")
+                      and abs(i["pos"][2]-pos[2]) < 5
+                      and math.dist(i["pos"][:2], zone["center"]) < zone["radius"]-5
+                      and math.dist(i["pos"], pos) < (180 if role == "laser_scout" else 75)]
+            if viable:
+                item = min(viable, key=lambda i: math.dist(pos, i["pos"]))
+                self.goal = tuple(item["pos"][:2])
+                self.mode = "laser" if role == "laser_scout" else "cube"
+    return Competitor

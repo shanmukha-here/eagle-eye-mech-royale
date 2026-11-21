@@ -20,7 +20,7 @@ import time
 
 from local_sim.game import Match
 from local_sim.geometry import Map
-from local_sim.pool import roster, scripted
+from local_sim.pool import QUALIFIERS, qualifying_controller, roster, scripted
 from local_sim.wire import Client
 
 ROOT = Path(__file__).resolve().parent
@@ -52,6 +52,10 @@ SPLITS = {
     "p6dev": (1900000, 96),
     "p6verify": (2000000, 200),
     "p6test": (2100000, 640),
+    "p7screen": (2200000, 48),
+    "p7cma": (2300000, 24),
+    "p7select": (2400000, 160),
+    "p7test": (2500000, 400),
 }
 DEFAULT_MIX = 3
 
@@ -173,6 +177,8 @@ def prepare(args):
             ]
         else:
             CMD[name] = [sys.executable, "-B", str(folder / "bot.py")]
+    for role in ("laser_scout", "cube_farmer", "ring_camper"):
+        FACTORIES[role] = qualifying_controller(role, FACTORIES["phase5"])
     sys.path.insert(0, str(kit / "python"))
     import mechfight
 
@@ -212,7 +218,8 @@ def run_match(job):
     dest = OUT / pool_name / str(mix) / (HASHES[name] + "-" + str(seed) + ".json")
     if dest.exists():
         return json.loads(dest.read_text())
-    g = Match(GEO, HELLO, seed, roster(mix, strong=pool_name == "strong"), ffa)
+    roles = QUALIFIERS if pool_name == "qualifiers" else roster(mix, strong=pool_name == "strong")
+    g = Match(GEO, HELLO, seed, roles, ffa)
     subject = g.players[g.subject]
 
     def hello(i):
@@ -342,8 +349,8 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test"),
-        default="p6test",
+        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test"),
+        default="p7test",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
@@ -354,7 +361,7 @@ def main():
         "--ffa", action="store_true", help="final-style independent opponents; separate cache"
     )
     ap.add_argument(
-        "--pool", choices=("practice", "strong", "both"), help="phase 4 defaults to both frozen fields"
+        "--pool", choices=("practice", "strong", "qualifiers", "both", "all"), help="phase 4 defaults to both frozen fields"
     )
     runtime = ap.add_mutually_exclusive_group()
     runtime.add_argument(
@@ -375,7 +382,7 @@ def main():
     if args.ffa and args.pool:
         ap.error("--ffa selects the legacy independent field; use --pool strong for competitor copies")
     pools = (
-        ["ffa"] if args.ffa else (["practice", "strong"] if args.pool in ("both", None) else [args.pool])
+        ["ffa"] if args.ffa else (["practice", "strong", "qualifiers"] if args.pool in ("all", None) else (["practice", "strong"] if args.pool == "both" else [args.pool]))
     )
     if args.docker is None:
         args.docker = shutil.which("docker") is not None
@@ -420,7 +427,7 @@ def main():
             initargs=(cpus,),
         ) as pool:
             for split in (
-                ({"p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
+                ({"p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
                 if args.split == "all"
                 else [args.split]
             ):
