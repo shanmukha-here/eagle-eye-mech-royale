@@ -48,6 +48,10 @@ class Bot:
         self.unstick_until = -1
         self.rescue_until = -1
         self.blocked_count = 0
+        self.cover_key = self.cover_point = None
+        self.cover_refresh = -1
+        self.repair_window = -1
+        self.repair_anchor = None
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -118,6 +122,48 @@ class Bot:
             if best is None or score < best[0]:
                 best = score, drop
         return best[1] if best else None
+
+    def _duel_cover(self, obs, rivals, mode, finish=None, relocate=False):
+        me, zone = obs["self"], obs["zone"]
+        pos = me["pos"]
+        key = (mode, tuple(m["id"] for m in rivals), finish["id"] if finish else None)
+        if self.cover_key == key and obs["t"] < self.cover_refresh:
+            return self.cover_point
+        self.cover_key = key
+        self.cover_refresh = obs["t"] + 0.8
+        eyes = [(*m["pos"][:2], m["pos"][2]+self._actor_center(m)*1.5) for m in rivals[:3]]
+        if not eyes:
+            # Score the approach indicated by recent fire and the two adjoining sectors.
+            for angle in (self.last_bearing, self.last_bearing-1.2, self.last_bearing+1.2):
+                xy = pos[0]+60*math.cos(angle), pos[1]+60*math.sin(angle)
+                cell = self.arena.cell(*xy)
+                if cell is not None:
+                    eyes.append((*xy,self.arena.floor[cell]+me["stats"]["muzzle_height"]))
+        best = None
+        for radius, count in ((0,1),(12,8),(28,8),(48,8)):
+            for i in range(count):
+                angle = self.last_bearing + math.tau*i/count
+                xy = pos[0]+radius*math.cos(angle), pos[1]+radius*math.sin(angle)
+                cell = self.arena.cell(*xy)
+                if cell is None or self.arena.clearance[cell] < me["stats"]["radius"]+1.8:
+                    continue
+                if math.dist(xy,zone["center"]) > zone["radius"]-4:
+                    continue
+                dest = (*xy,self.arena.floor[cell]+me["stats"]["muzzle_height"])
+                blocked = sum(not self.arena.line_open(eye,dest) for eye in eyes)
+                score = 48*blocked / max(1,len(eyes)) - 0.38*radius
+                if relocate:
+                    score += min(22,radius)*0.9
+                if rivals:
+                    score += min(25,math.dist(xy,rivals[0]["pos"][:2])-math.dist(pos[:2],rivals[0]["pos"][:2]))*.35
+                if finish:
+                    q=finish["pos"]
+                    score += 16*self.arena.line_open(dest,(*q[:2],q[2]+self._actor_center(finish)))
+                score -= 0.6*max(0,math.dist(xy,zone["next_center"])-zone["next_radius"])
+                if best is None or score>best[0]:
+                    best=score,xy
+        self.cover_point = best[1] if best else tuple(pos[:2])
+        return self.cover_point
 
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
@@ -590,6 +636,8 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
+        if self.mode == "recovering":
+            weight = 0.12
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
@@ -687,6 +735,8 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
+        if self.mode == "recovering" and not self.blocked_count:
+            boosting = goal_dist > 7 and me["grounded"] and me["energy"] > 28
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
@@ -764,6 +814,21 @@ class Bot:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
             self.plan_at = t
             healing = False
+        if (self.mech_kills>=2 and hp_fraction<0.82 and not urgent
+                and any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"])
+                and not any(clear and distance<58 for _,distance,clear in threats)):
+            self.repair_window=t+5.6
+            self.repair_anchor=tuple(p[:2])
+            self.cover_key=None
+        if any(clear and distance<43 for _,distance,clear in threats):
+            self.repair_window=-1
+        recovering=(t<self.repair_window and drop is None and not urgent and hp_fraction<0.87)
+        if recovering:
+            self.goal=self._duel_cover(obs,[m for m,_,_ in threats],"recovering",
+                                       relocate=math.dist(self.repair_anchor,p[:2])<13)
+            self.mode="recovering"
+            self.plan_at=t
+            healing=False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -783,10 +848,8 @@ class Bot:
                 move, boost, jump = (0, 0), False, False
             elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
                 boost = True
-        # Enter the ring on foot. Jetting over its boundary consumes part of the capture window.
-        if drop is not None and 4.5 < math.dist(p[:2],drop["pos"][:2]) < 15:
-            if not self.blocked_count and math.hypot(*me["vel"][:2]) > 0.4:
-                boost,jump=False,False
+        if recovering and math.dist(p[:2],self.goal)<4:
+            move,boost,jump=(0,0),False,False
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
@@ -801,6 +864,11 @@ class Bot:
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
         self._weapons(obs, target, center, act, urgent)
+        if recovering:
+            gun=me["weapons"][0]
+            if gun["ammo"]<gun["stats"]["mag"] and gun["reload"]<=0:
+                act["reload"]=True
+            act["fire"]=[False,False]
         return act
 
 

@@ -88,6 +88,7 @@ SPLITS = {
     "p13aid": (5700000, 240),
     "chain-dev": (6050000, 80),
     "chain-test": (6200000, 240),
+    "chain-confirm": (6400000, 240),
     "p12last": (4200000, 240),
     "p11diag": (3400000, 400),
     "p11dev": (3500000, 80),
@@ -413,12 +414,12 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test", "p9test", "p10test", "p10combine", "p11test", "p12test", "p12confirm", "p12last", "p13test", "p13confirm", "p13aid", "chain-test"),
+        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test", "p9test", "p10test", "p10combine", "p11test", "p12test", "p12confirm", "p12last", "p13test", "p13confirm", "p13aid", "chain-test", "chain-confirm"),
         default="chain-test",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
-    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["sweep", "candidate"])
+    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["lifeline", "sweep", "candidate"])
     ap.add_argument("--mix", type=int, choices=range(5), default=DEFAULT_MIX)
     ap.add_argument("--workers", type=int, help="default: 6 in Docker, 48 native")
     ap.add_argument(
@@ -491,7 +492,7 @@ def main():
             initargs=(cpus,),
         ) as pool:
             for split in (
-                ({"chain-test": "chain-dev", "p13aid": "p13dev", "p13confirm": "p13dev", "p13test": "p13dev", "p12last": "p12dev", "p12confirm": "p12dev", "p12test": "p12dev", "p11test": "p11dev", "p10test": "p10dev", "p10combine": "p10rules", "p9test": "p9dev", "p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
+                ({"chain-confirm": "chain-dev", "chain-test": "chain-dev", "p13aid": "p13dev", "p13confirm": "p13dev", "p13test": "p13dev", "p12last": "p12dev", "p12confirm": "p12dev", "p12test": "p12dev", "p11test": "p11dev", "p10test": "p10dev", "p10combine": "p10rules", "p9test": "p9dev", "p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
                 if args.split == "all"
                 else [args.split]
             ):
