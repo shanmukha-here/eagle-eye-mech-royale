@@ -6,6 +6,7 @@ import os
 import resource
 import select
 import subprocess
+import tempfile
 import time
 import uuid
 
@@ -59,12 +60,14 @@ class Client:
                 + ["--name", self.container_name, "--cpuset-cpus", str(min(os.sched_getaffinity(0)))]
                 + cmd[2:]
             )
+        self.diagnostics = {}
+        self.log = tempfile.TemporaryFile()
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             bufsize=0,
-            stderr=subprocess.DEVNULL,
+            stderr=self.log,
             preexec_fn=None if os.path.basename(cmd[0]) == "docker" else child_limits,
         )
         os.set_blocking(self.proc.stdin.fileno(), False)
@@ -176,3 +179,12 @@ class Client:
         self.proc.wait()
         self.proc.stdin.close()
         self.proc.stdout.close()
+        if not self.log.closed:
+            self.log.seek(max(0, self.log.tell() - 16384))
+            for line in self.log:
+                if line.startswith(b"MECH_SWITCHES "):
+                    try:
+                        self.diagnostics = json.loads(line.split(b" ", 1)[1])
+                    except (ValueError, UnicodeError):
+                        pass
+            self.log.close()

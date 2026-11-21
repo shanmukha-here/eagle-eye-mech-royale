@@ -232,8 +232,15 @@ def run_match(job):
     if docker:
         h = dict(h, map=dict(h["map"], dir="/arena"))
     client = Client(CMD[name], h)
+    decisions = quiet = seen = 0
     try:
         while True:
+            decisions += 1
+            state = subject.s
+            speed = math.hypot(*state["vel"][:2])
+            quiet += state["grounded"] and 0.05 < speed < HELLO["config"]["sound"]["step_speed"]
+            seen += any(p.life and p is not subject and g.visible(p, state["pos"], state["stats"]["height"])
+                        for p in g.players)
             g.refresh_team()
             for p in g.players:
                 if not p.life:
@@ -281,6 +288,10 @@ def run_match(job):
     finally:
         client.close()
     row = {
+        "decisions": decisions,
+        "quiet_seconds": round(quiet * .1, 1),
+        "seen_seconds": round(seen * .1, 1),
+        "switch_frames": client.diagnostics,
         "seed": seed,
         "points": 16 - place,
         "place": place,
