@@ -317,6 +317,19 @@ class Bot:
                 add(px+dx*spacing,py+dy*spacing,"duel",bonus,detour=True)
         if not urgent and radius >= 40 and self.uncredited_eliminations >= 1:
             goals.extend(self._perimeter_goals(obs, threats))
+        sidearm = me["weapons"][1]
+        if not urgent and sidearm and sidearm["kind"] == "laser" and threats:
+            enemy, distance, clear = threats[0]
+            if clear and distance < 225 and enemy["hp"] > 0.28 * me["max_hp"]:
+                # Hold laser reach and keep a second route into the next circle.
+                ex, ey = enemy["pos"][:2]
+                away = math.atan2(y-ey, x-ex)
+                for offset in (0, -0.52, 0.52, -1.05, 1.05):
+                    angle = away + offset
+                    length = min(60, max(14, 238-distance))
+                    px, py = x+length*math.cos(angle), y+length*math.sin(angle)
+                    if math.dist((px, py), zone["center"]) < zone["radius"] - 8:
+                        add(px, py, "standoff", 185)
         if goals:
             _, gx, gy, self.mode = max(goals)
             self.goal = (gx, gy)
@@ -454,6 +467,8 @@ class Bot:
             if not gun.get("reload", 0) and (ammo == 0 or (target is None and ammo <= gun["stats"]["mag"]*0.72)):
                 act["reload"] = True
         if target is None:
+            if side and side["kind"] == "laser" and not urgent and obs["t"] - self.last_contact < 4:
+                act["fire"] = [False, side.get("charge", 0) > 0 or side["cooldown"] <= 0.1]
             return
         p, q = me["pos"], target["pos"]
         vx, vy, vz = target.get("vel", (0, 0, 0))
@@ -605,6 +620,8 @@ class Bot:
                 weight = 0.23
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and not urgent:
             weight = 0.12
+        if self.mode == "standoff":
+            weight = 0.23
         if self.mode == "screen":
             weight = 0.12
             if goal_dist < 2:
@@ -792,7 +809,8 @@ class Bot:
                 self.screens = self._screen(obs, rival)
             if self.screens and (not armed or rival["hp"] > 0.36 * me["max_hp"]):
                 screen, can_fire = self.screens
-                if can_fire or (exposed and (not armed or pressured or me["weapons"][0]["reload"] > 0)):
+                if can_fire or (exposed and (not armed or
+                        (me["weapons"][0]["reload"] > 0 and me["hp"] < 0.8 * me["max_hp"]))):
                     # Take a position on the equipment route with the center shielded.
                     close_weapon = self.mode in ("laser", "lightning") and math.dist(self.goal, p[:2]) < 24
                     if not close_weapon or armed:
@@ -831,7 +849,7 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
-        if tactical and not armed and math.dist(self.goal, p[:2]) > 5:
+        if tactical and not armed and math.dist(self.goal, p[:2]) > 5 and target and target.get("hp", 1400) > 180:
             target = None
         self._weapons(obs, target, center, act, urgent)
         return act
