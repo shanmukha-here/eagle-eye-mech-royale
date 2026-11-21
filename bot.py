@@ -425,6 +425,28 @@ class Bot:
                         self.observed_duel = frozenset((victim_id, other_id))
                         self.observed_duel_until = t + 1.0
                         break
+        if t >= self.observed_duel_until and obs["alive"] > 6:
+            # Mutual aim can reveal a duel before its next hit.
+            for first_id, (first, _) in nearby.items():
+                fx,fy,_ = first["pos"]
+                self_bearing = math.atan2(me["pos"][1]-fy, me["pos"][0]-fx)
+                if abs(angle_delta(self_bearing,first["aim"][0])) < 0.68:
+                    continue
+                for second_id, (second, _) in nearby.items():
+                    if second_id <= first_id:
+                        continue
+                    sx,sy,_ = second["pos"]
+                    if not 21 < math.hypot(sx-fx,sy-fy) < 108:
+                        continue
+                    angle = math.atan2(sy-fy,sx-fx)
+                    if (abs(angle_delta(angle,first["aim"][0])) > 0.21
+                            or abs(angle_delta(angle+math.pi,second["aim"][0])) > 0.21):
+                        continue
+                    their_bearing = math.atan2(me["pos"][1]-sy,me["pos"][0]-sx)
+                    if abs(angle_delta(their_bearing,second["aim"][0])) > 0.68:
+                        self.observed_duel = frozenset((first_id,second_id))
+                        self.observed_duel_until = t + 0.35
+                        break
         pair = self.observed_duel
         if t < self.observed_duel_until and pair <= nearby.keys():
             # A nearby unrelated rival remains urgent even when two others are occupied.
@@ -872,6 +894,10 @@ class Bot:
             elif not (side and side.get("charge",0)>0) and all(distance > 42 and abs(angle_delta(
                     math.atan2(p[1]-enemy["pos"][1],p[0]-enemy["pos"][0]),enemy["aim"][0])) > 0.6
                     for enemy, distance in duel):
+                if outside_next < -14 and all(distance > 50 for _, distance in duel):
+                    act["move"] = tuple(0.42*x for x in act["move"])
+                    self.previous_move = act["move"]
+                    act["boost"] = False
                 target, center = None, 0
         self._weapons(obs, target, center, act, urgent)
         return act
