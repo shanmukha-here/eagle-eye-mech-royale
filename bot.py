@@ -24,6 +24,8 @@ class Bot:
         self.seed_angle = math.tau * ((hello["seed"] % 10007) / 10007)
         self.previous_target = None
         self.charge_since = {}
+        self.searched = set()
+        self.last_search_sample = -2
         self.loot = {}
         self.plan_at = -1
         self.goal = (0, 0)
@@ -187,6 +189,27 @@ class Bot:
                     continue
                 score = 220 - distance * 0.26 - min(35, (obs["t"] - seen) * 0.4)
                 goals.append((score, *point[:2], "laser"))
+        if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
+            seconds_left = zone["shrink_end"] - obs["t"] - 9
+            # Prefer reachable ground we have not passed while looking for a second weapon.
+            visited_centers = [((i + 0.5) * 25, (j + 0.5) * 25) for i, j in self.searched]
+            for distance in (36, 72, 104):
+                for step in range(16):
+                    heading = self.seed_angle + step * math.pi / 8
+                    px, py = x + distance * math.cos(heading), y + distance * math.sin(heading)
+                    cell = self.arena.cell(px, py)
+                    if cell is None or self.arena.clearance[cell] < me["stats"]["radius"] + 2:
+                        continue
+                    if math.dist((px, py), zone["center"]) > zone["radius"] - 9:
+                        continue
+                    home = max(0, math.dist((px, py), zone["next_center"]) - radius + 10)
+                    if (home + distance) * 1.8 / me["stats"]["walk_speed"] > seconds_left:
+                        continue
+                    novelty = min((math.hypot(px - ex, py - ey) for ex, ey in visited_centers), default=90)
+                    keep_goal = max(0, 10 - math.dist((px, py), self.goal) * 0.12) if self.mode == "explore" else 0
+                    score = 86 + min(95, novelty) * 0.23 - distance * 0.06
+                    score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
+                    goals.append((score, px, py, "explore"))
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
             values = {"cube": 44, "lightning": 37, "laser": 36, "crate": 21}
@@ -640,6 +663,9 @@ class Bot:
         self.charge_since = {
             m["id"]: self.charge_since.get(m["id"], t) for m in obs["mechs"] if m.get("charging")
         }
+        if t < 45 and t - self.last_search_sample >= 1.5 and me["weapons"][1] is None:
+            self.last_search_sample = t
+            self.searched.add((int(p[0] // 25), int(p[1] // 25)))
         self._resources(obs)
         threats, npcs = self._visible_contacts(obs)
         live = [m for m, _, clear in threats if clear]
