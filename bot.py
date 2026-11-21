@@ -193,8 +193,7 @@ class Bot:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
             # Prefer reachable ground we have not passed while looking for a second weapon.
             visited_centers = [((i + 0.5) * 25, (j + 0.5) * 25) for i, j in self.searched]
-            # Search farther across open ground to expose more floor pickups.
-            for distance in (56, 100, 150):
+            for distance in (36, 72, 104):
                 for step in range(16):
                     heading = self.seed_angle + step * math.pi / 8
                     px, py = x + distance * math.cos(heading), y + distance * math.sin(heading)
@@ -421,6 +420,12 @@ class Bot:
                     vx += max(-28, min(28, (vx - old_vx) / elapsed)) * horizon * 0.52
                     vy += max(-28, min(28, (vy - old_vy) / elapsed)) * horizon * 0.52
             self.previous_target = (target["id"], obs["t"], *target["vel"][:2])
+        if target.get("kind") == "mech" and gun and not laser_due:
+            # Account for motion along the firing line as well as across it.
+            dx, dy, dz = q[0]-p[0], q[1]-p[1], q[2]+center-muzzle[2]
+            speed = gun["stats"]["speed"]
+            for _ in range(2):
+                seconds = math.hypot(dx+vx*seconds, dy+vy*seconds, dz+vz*seconds) / max(1, speed)
         if laser_due:
             seconds = 0
         point = (q[0]+vx*seconds, q[1]+vy*seconds, q[2]+center+vz*seconds)
