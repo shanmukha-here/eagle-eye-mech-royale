@@ -698,6 +698,27 @@ class Bot:
             boosting = me["energy"] > 10
         if self.blocked_count >= 2 and me["grounded"] and not jumping:
             boosting = False
+        if dangers and not urgent:
+            stats = me["stats"]
+            use_boost = True and me["energy"] > 25 and me["grounded"]
+            speed = stats["boost_speed"] if use_boost else stats["walk_speed"]
+
+            def clear_of(ax, ay, sp):
+                ox, oy = ax*sp - me["vel"][0], ay*sp - me["vel"][1]
+                change = math.hypot(ox, oy) / stats["ground_accel" if me["grounded"] else "air_accel"]
+                worst = 99
+                for eta, mx, my, vx, vy in dangers:
+                    drift = eta - 0.5*change if eta >= change else 0.5*eta**2/max(0.001, change)
+                    worst = min(worst, abs((mx + ox*drift)*vy - (my + oy*drift)*vx)/max(1, math.hypot(vx, vy)))
+                return worst
+            need = stats["radius"] + 0.75
+            if clear_of(best[0], best[1], stats["walk_speed"]) < need:
+                options = [(math.cos(k*math.tau/16), math.sin(k*math.tau/16)) for k in range(16)]
+                options = [d for d in options if self.arena.travel_room(p, d, 4, stats) > 2]
+                if options:
+                    pick = max(options, key=lambda d: clear_of(d[0], d[1], speed))
+                    if clear_of(pick[0], pick[1], speed) > clear_of(best[0], best[1], stats["walk_speed"]):
+                        best, boosting = pick, use_boost
         return best, boosting, jumping
 
     def act(self, obs):
