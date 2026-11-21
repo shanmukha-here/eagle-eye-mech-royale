@@ -27,6 +27,11 @@ from local_sim.wire import Client
 
 ROOT = Path(__file__).resolve().parent
 REFS = {
+    "lifeline": "8dec71a03afdc7d2e73335fe1fee1fee89d57303",
+    "stride": "4e3c51f7a4f5718aed2e862deaae1c083e21ff6f",
+    "mill": "bf3e794b82660464340df592701a01ee6ddfdfd2",
+    "carry": "8fe2e27a2740b0cea9c96b9df9899d0c6105841c",
+
     "overlook": "8c370630a093ada974bae3ec669acf56ddef198d",
     "distance": "0cc24d0f151ba807422461e4f2e873d80a0f4139",
     "refine": "da47dd5d66dbfd337d012f011139c01d15d49ea1",
@@ -81,6 +86,8 @@ SPLITS = {
     "p13test": (5300000, 240),
     "p13confirm": (5500000, 240),
     "p13aid": (5700000, 240),
+    "chain-dev": (6050000, 80),
+    "chain-test": (6200000, 240),
     "p12last": (4200000, 240),
     "p11diag": (3400000, 400),
     "p11dev": (3500000, 80),
@@ -406,12 +413,12 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test", "p9test", "p10test", "p10combine", "p11test", "p12test", "p12confirm", "p12last", "p13test", "p13confirm", "p13aid"),
-        default="p13test",
+        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test", "p9test", "p10test", "p10combine", "p11test", "p12test", "p12confirm", "p12last", "p13test", "p13confirm", "p13aid", "chain-test"),
+        default="chain-test",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
-    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["sweep", "overlook", "candidate"])
+    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["sweep", "candidate"])
     ap.add_argument("--mix", type=int, choices=range(5), default=DEFAULT_MIX)
     ap.add_argument("--workers", type=int, help="default: 6 in Docker, 48 native")
     ap.add_argument(
@@ -484,7 +491,7 @@ def main():
             initargs=(cpus,),
         ) as pool:
             for split in (
-                ({"p13aid": "p13dev", "p13confirm": "p13dev", "p13test": "p13dev", "p12last": "p12dev", "p12confirm": "p12dev", "p12test": "p12dev", "p11test": "p11dev", "p10test": "p10dev", "p10combine": "p10rules", "p9test": "p9dev", "p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
+                ({"chain-test": "chain-dev", "p13aid": "p13dev", "p13confirm": "p13dev", "p13test": "p13dev", "p12last": "p12dev", "p12confirm": "p12dev", "p12test": "p12dev", "p11test": "p11dev", "p10test": "p10dev", "p10combine": "p10rules", "p9test": "p9dev", "p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
                 if args.split == "all"
                 else [args.split]
             ):
@@ -512,7 +519,7 @@ def main():
                         "mean_kills": statistics.mean(r["kills"] for r in rows),
                     }
                     print(split, name, json.dumps(out[name]), flush=True)
-                references = [name for name in ("sweep", "overlook", "distance", "refine", "ambush", "phase5", "crystal", "rangegear", "phase4", "phase3", "phase2") if name in groups]
+                references = [name for name in ("sweep", "lifeline", "stride", "mill", "carry", "overlook", "distance", "refine", "ambush", "phase5", "crystal", "rangegear", "phase4", "phase3", "phase2") if name in groups]
                 reference = max(references, key=lambda name: official_scores.get(REFS[name][:7], -1), default=None)
                 if "candidate" in groups and reference in groups:
                     delta = [
