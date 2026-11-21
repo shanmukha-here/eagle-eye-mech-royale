@@ -146,12 +146,28 @@ class Bot:
                 for i in range(8):
                     angle = i*math.pi/4
                     add(x+dist*math.cos(angle), y+dist*math.sin(angle), "cover", 12)
-        if not urgent and not retreat and radius > 7:
+        if (not threats and not urgent and obs["t"]-self.last_contact > 6
+                and obs["t"] < 90 and me["hp"] > 0.85*me["max_hp"] and radius >= 140
+                and (me["weapons"][1] is None or me["cubes"] < 2)
+                and math.hypot(x-cx, y-cy) < safe_radius-45):
+            if self.mode == "search" and math.dist(self.goal, pos[:2]) > 7:
+                add(*self.goal, "search", 26, True)
+            else:
+                angle = self.seed_angle + int(obs["t"]/5)*2.40
+                for offset in (0, 1.57, -1.57):
+                    add(x+36*math.cos(angle+offset), y+36*math.sin(angle+offset), "search", 25, True)
+        if not urgent and radius > 7 and (not retreat or
+                (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
             values = {"cube": 44, "lightning": 37, "laser": 36, "crate": 21}
+            gearing = me["weapons"][1] is None and obs["t"] < 120
+            if gearing:
+                values.update(laser=105, lightning=105, crate=50)
+            if me["cubes"] < 3:
+                values["cube"] += 27
             for point, kind, seen in self.loot.values():
                 if kind not in values or (kind in ("lightning", "laser") and all(me["weapons"])):
                     continue
-                if abs(point[2]-pos[2]) > 12 or math.dist(pos, point) > 105:
+                if abs(point[2]-pos[2]) > 12 or math.dist(pos, point) > (165 if gearing else 105):
                     continue
                 if any(clear and math.dist(m["pos"][:2], point[:2]) < 32
                        for m, _, clear in threats[:3]):
@@ -331,11 +347,29 @@ class Bot:
             rx, ry = direction(p[0]-m["pos"][0], p[1]-m["pos"][1])
             side = 1 if math.sin(t*1.35+self.seed_angle) > 0 else -1
             retreat = 0.65 if d < 40 or pressured else 0.15
+            secondary = me["weapons"][1]
+            hp_fraction = me["hp"]/me["max_hp"]
+            if secondary and secondary["kind"] == "lightning" and len(live) <= 2 and not urgent and hp_fraction > .63 and d < 135:
+                if d > secondary["stats"]["range"]*.76:
+                    retreat = -3.5
+                elif d < 19:
+                    retreat = 1.4
+                else:
+                    retreat = 0
+            elif len(live) == 1 and not urgent and hp_fraction > 0.62 and not pressured:
+                if secondary and secondary["kind"] == "lightning" and 29 < d < 100:
+                    retreat = -2.8
+                elif m.get("hp", me["hp"]) < me["hp"]*0.64 and 25 < d < 100:
+                    retreat = -1.2
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live:
             return (0, 0), False, False
         # A small set of commands keeps obstacle and zone checks bounded.
         weight = 0 if not live else (0.28 if urgent else 1.6)
+        if live and not urgent and not pressured and self.mode in ("laser", "lightning", "cube", "crate", "drop"):
+            # A distant or solitary visible actor need not divert us from an upgrade.
+            if live[0][1] > 45 and me["hp"] > 0.7*me["max_hp"]:
+                weight = 0.23
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
