@@ -818,7 +818,9 @@ class Bot(PlacementBot):
                         continue
                     rise=a.top[c]-pos[2]
                     me=obs["self"]
-                    if (3 < rise < 18 and math.hypot(dx,dy)<24 and
+                    natural_rise = me["stats"]["jump_speed"]**2 / (2*me["stats"]["gravity"])
+                    reachable_rise = 18 if self.escape else natural_rise-.2
+                    if (self.arena.top[c] > self.arena.floor[c]+2 and -.5 < rise < reachable_rise and math.hypot(dx,dy)<24 and
                         (rise/me["stats"]["max_rise_speed"]+.7)*me["stats"]["jet_drain"]+18 < me["energy"]):
                         near=a.nearest((x,y),room=me["stats"]["radius"]+2)
                         if near is not None and math.dist(a.points[near],(x,y))<12:
