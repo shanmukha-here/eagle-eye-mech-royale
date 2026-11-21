@@ -28,6 +28,8 @@ class Bot:
         self.mode = ""
         self.encounter = None
         self.encounter_until = -1
+        self.mech_kills = 0
+        self.uncredited_eliminations = 0
         self.last_contact = -100
         self.last_drone = (-1, -100)
         self.damage_window = []
@@ -158,6 +160,10 @@ class Bot:
                 angle = self.seed_angle + int(obs["t"]/5)*2.40
                 for offset in (0, 1.57, -1.57):
                     add(x+36*math.cos(angle+offset), y+36*math.sin(angle+offset), "search", 25, True)
+        if not urgent and obs["t"] < 60 and me["weapons"][1] is None:
+            for point, kind, seen in self.loot.values():
+                if kind in ("laser", "lightning") and abs(point[2] - pos[2]) <= 4 and math.dist(pos, point) < 140:
+                    add(*point[:2], kind, 155 - 2 * (obs["t"] - seen), detour=True)
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
             values = {"cube": 44, "lightning": 37, "laser": 36, "crate": 21}
@@ -206,6 +212,8 @@ class Bot:
                 dx,dy = direction(x-px,y-py)
                 spacing = 22 if me["weapons"][1] else 32
                 add(px+dx*spacing,py+dy*spacing,"duel",bonus,detour=True)
+        if not urgent and radius >= 40 and self.uncredited_eliminations >= 1:
+            goals.extend(self._perimeter_goals(obs, threats))
         if goals:
             _, gx, gy, self.mode = max(goals)
             self.goal = (gx, gy)
@@ -216,6 +224,42 @@ class Bot:
                     self.encounter, self.encounter_until = enemy["id"], obs["t"]+2.5
         else:
             self.goal, self.mode = (cx, cy), "zone"
+
+    def _perimeter_goals(self, obs, threats):
+        """Sample reachable points on the quiet side of the current circle."""
+        me, zone = obs["self"], obs["zone"]
+        x, y = me["pos"][:2]
+        cx, cy = zone["center"]
+        nx, ny = zone["next_center"]
+        speed = me["stats"]["walk_speed"]
+        # Reserve 14 seconds and budget a 1.7x detour for the return journey.
+        time_left = max(0, zone["shrink_end"] - obs["t"] - 14)
+        slack = min(120, time_left * speed * 0.39)
+        ring_radius = max(15, min(zone["radius"] - 22, zone["next_radius"] + slack - 18))
+        bearing = math.atan2(y - cy, x - cx)
+        for offset in (0, 0.32, -0.32, 0.70, -0.70, 1.15, -1.15):
+            angle = bearing + offset
+            dx = cx + ring_radius * math.cos(angle) - x
+            dy = cy + ring_radius * math.sin(angle) - y
+            ux, uy = direction(dx, dy)
+            step = min(65, math.hypot(dx, dy))
+            for length in (step, step * 0.5):
+                px, py = x + ux * length, y + uy * length
+                cell = self.arena.cell(px, py)
+                if cell is None or self.arena.clearance[cell] < me["stats"]["radius"] + 2.1:
+                    continue
+                return_distance = max(0, math.hypot(px - nx, py - ny) - zone["next_radius"] + 10)
+                if (return_distance + length) * 1.7 / speed > time_left:
+                    continue
+                radial_distance = math.hypot(px - cx, py - cy)
+                if radial_distance > zone["radius"] - 10:
+                    continue
+                separation = min(
+                    (math.dist((px, py), actor["pos"][:2]) for actor, _, _ in threats), default=130
+                )
+                radial_error = abs(radial_distance - ring_radius)
+                score = 78 - min(radial_error, 120) * 0.28 + min(140, separation) * 0.13 - 0.11 * length
+                yield score, px, py, "skirt"
 
     def _can_recover_in_view(self, obs, threats):
         # A visible beam ending on another mech is evidence of a separate fight.
@@ -336,6 +380,42 @@ class Bot:
                                and distance <= side["stats"]["range"] and ey < 0.5)
         act["fire"] = fire
 
+    def _incoming_projectiles(self, obs):
+        """Select up to six visible gun rounds passing through the mech's height and footprint."""
+        me = obs["self"]
+        hazards = []
+        for shot in obs["projectiles"]:
+            if shot["kind"] != "gun":
+                continue
+            rx, ry, rz = (a - b for a, b in zip(me["pos"], shot["pos"]))
+            vx = shot["vel"][0] - me["vel"][0]
+            vy = shot["vel"][1] - me["vel"][1]
+            eta = (rx * vx + ry * vy) / max(1, vx * vx + vy * vy)
+            if not 0.05 < eta < 0.82:
+                continue
+            dz = rz + (me["vel"][2] - shot["vel"][2]) * eta
+            if not -me["stats"]["height"] - 1.5 < dz < 2:
+                continue
+            mx, my = rx - vx * eta, ry - vy * eta
+            if math.hypot(mx, my) < me["stats"]["radius"] + 4.5:
+                hazards.append((eta, mx, my, vx, vy))
+                if len(hazards) == 6:
+                    break
+        return hazards
+
+    def _dodge_score(self, score, me, ax, ay, hazards):
+        stats = me["stats"]
+        ox = ax * stats["walk_speed"] - me["vel"][0]
+        oy = ay * stats["walk_speed"] - me["vel"][1]
+        change = math.hypot(ox, oy) / stats["ground_accel" if me["grounded"] else "air_accel"]
+        for eta, mx, my, vx, vy in hazards:
+            # A direction change takes time. Integrate the achievable velocity change up to the pass.
+            drift = eta - 0.5 * change if eta >= change else 0.5 * eta ** 2 / max(0.001, change)
+            clearance = abs((mx + ox * drift) * vy - (my + oy * drift) * vx) / max(1, math.hypot(vx, vy))
+            fraction = max(0, min(1, clearance / (stats["radius"] + 0.75)))
+            score += 14 * fraction / max(0.18, eta)
+        return score
+
     def _move(self, obs, threats, urgent, pressured):
         me, zone, t = obs["self"], obs["zone"], obs["t"]
         p = me["pos"]
@@ -391,7 +471,7 @@ class Bot:
                 elif m.get("hp", me["hp"]) < me["hp"]*0.64 and 25 < d < 100:
                     retreat = -1.2
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
-        if endpoint and not live:
+        if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
         # A small set of commands keeps obstacle and zone checks bounded.
         weight = 0 if not live else (0.28 if urgent else 1.6)
@@ -399,6 +479,10 @@ class Bot:
             # A distant or solitary visible actor need not divert us from an upgrade.
             if live[0][1] > 45 and me["hp"] > 0.7*me["max_hp"]:
                 weight = 0.23
+        if self.mode in ("laser", "lightning") and me["weapons"][1] is None and not urgent:
+            weight = 0.12
+        if self.mode == "skirt" and goal_dist > 9 and not urgent:
+            weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
         if self.mode == "cover" and not endpoint:
@@ -415,8 +499,11 @@ class Bot:
             weight = 0
         path_scale = 0.0 if endpoint else 1.0
         dx, dy = direction(path_scale*route[0]+weight*evade[0], path_scale*route[1]+weight*evade[1])
+        dangers = self._incoming_projectiles(obs) if not urgent and self.mode not in ("drop", "heal") else []
         if dx == dy == 0:
-            return (0, 0), False, False
+            if not dangers:
+                return (0, 0), False, False
+            dx, dy = direction(-dangers[0][4], dangers[0][3])
         base = math.atan2(dy, dx)
         best, best_score = (0, 0), -math.inf
         radius = zone["radius"]
@@ -428,6 +515,8 @@ class Bot:
             ax, ay = math.cos(base+angle), math.sin(base+angle)
             room = self.arena.travel_room(p, (ax, ay), horizon, me["stats"])
             score = math.cos(angle)*4 + min(horizon, room)*0.65
+            if dangers and room > 2:
+                score = self._dodge_score(score, me, ax, ay, dangers)
             if room < 2:
                 score -= 15
             next_gap = math.hypot(p[0]+ax*8-zone["center"][0], p[1]+ay*8-zone["center"][1])-radius
@@ -484,6 +573,8 @@ class Bot:
     def act(self, obs):
         me, zone, t = obs["self"], obs["zone"], obs["t"]
         p = me["pos"]
+        self.mech_kills += sum(e["type"] == "kill" and 0 <= e["target"] < 16 for e in obs["events"])
+        self.uncredited_eliminations = max(0, 16 - obs["alive"] - self.mech_kills)
         self._resources(obs)
         threats, npcs = self._visible_contacts(obs)
         live = [m for m, _, clear in threats if clear]
@@ -549,6 +640,9 @@ class Bot:
         else:
             sounds = [s for s in obs["sounds"] if s["kind"] in ("gun", "laser", "lightning", "mortar", "laser_charge")]
             yaw = sounds[-1]["bearing"] if sounds else self.seed_angle + t*0.95
+        if target is None and me["weapons"][1] is None and t < 70 and t - self.last_contact > 1:
+            # Complete a sight sweep during the opening without changing leg direction.
+            yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
         self._weapons(obs, target, center, act, urgent)
         return act
