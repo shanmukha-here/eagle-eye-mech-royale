@@ -351,8 +351,6 @@ class Bot:
             priorities = {"plating": 10, "armor": 9.5, "gun_damage": 9, "nanites": 8.5,
                           "gun_rate": 8, "gun_mag": 7.5, "servos": 7, "lightning_range": 7,
                           "laser_damage": 7, "gun_velocity": 6, "jets": 5, "sensors": 5}
-            priorities.update(gun_mag=11, gun_damage=10.5, gun_rate=9.8, laser_damage=10.4,
-                              lightning_range=10.3, gun_velocity=8.6)
             choices = obs["offer"]["choices"]
             if choices:
                 act["pick"] = max(range(len(choices)), key=lambda i: priorities.get(choices[i]["id"], 3))
