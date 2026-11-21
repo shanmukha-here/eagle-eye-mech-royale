@@ -188,18 +188,13 @@ class Bot:
                 if math.dist(point[:2], zone["center"]) > zone["radius"] - 6:
                     continue
                 score = 245 - distance * 0.22 - min(35, (obs["t"] - seen) * 0.4)
-                # Compare our arrival with the nearest visible competitor.
-                for rival, _, clear in threats[:3]:
-                    if clear:
-                        lead = distance - math.dist(rival["pos"], point)
-                        if lead > -12:
-                            score -= min(130, (lead + 12) * 2.5)
                 goals.append((score, *point[:2], "laser"))
         if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
             # Prefer reachable ground we have not passed while looking for a second weapon.
             visited_centers = [((i + 0.5) * 25, (j + 0.5) * 25) for i, j in self.searched]
-            for distance in (36, 72, 104):
+            # Search farther across open ground to expose more floor pickups.
+            for distance in (56, 100, 150):
                 for step in range(16):
                     heading = self.seed_angle + step * math.pi / 8
                     px, py = x + distance * math.cos(heading), y + distance * math.sin(heading)
