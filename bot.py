@@ -141,17 +141,41 @@ class Bot:
                 for i in range(8):
                     angle = self.seed_angle + i*math.pi/4
                     add(ax+dist*math.cos(angle), ay+dist*math.sin(angle), "zone", 10, True)
+        if radius >= 36 and not urgent and not retreat:
+            # Stay on a reachable quiet side of the next ring and leave time to cross.
+            theta = math.atan2(y-cy, x-cx)
+            ring = max(12, radius - min(24, radius*0.23))
+            for offset in (0, 0.32, -0.32, 0.68, -0.68):
+                gx = cx + ring*math.cos(theta+offset)
+                gy = cy + ring*math.sin(theta+offset)
+                crowd = sum(max(0, 1-math.dist((gx,gy), m["pos"][:2])/100) for m,_,_ in threats)
+                add(gx, gy, "edge", 33-18*crowd, detour=True)
         if retreat:
             for dist in (14, 30):
                 for i in range(8):
                     angle = i*math.pi/4
                     add(x+dist*math.cos(angle), y+dist*math.sin(angle), "cover", 12)
+        if (not threats and not urgent and obs["t"]-self.last_contact > 6
+                and obs["t"] < 90 and me["hp"] > 0.85*me["max_hp"] and radius >= 140
+                and (me["weapons"][1] is None or me["cubes"] < 2)
+                and math.hypot(x-cx, y-cy) < safe_radius-45):
+            if self.mode == "search" and math.dist(self.goal, pos[:2]) > 7:
+                add(*self.goal, "search", 26, True)
+            else:
+                angle = self.seed_angle + int(obs["t"]/5)*2.40
+                for offset in (0, 1.57, -1.57):
+                    add(x+36*math.cos(angle+offset), y+36*math.sin(angle+offset), "search", 25, True)
         if not urgent and not retreat and radius > 7:
             values = {"cube": 44, "lightning": 37, "laser": 36, "crate": 21}
+            gearing = me["weapons"][1] is None and obs["t"] < 120
+            if gearing:
+                values.update(laser=58, lightning=56, crate=28)
+            if me["cubes"] < 3:
+                values["cube"] += 12
             for point, kind, seen in self.loot.values():
                 if kind not in values or (kind in ("lightning", "laser") and all(me["weapons"])):
                     continue
-                if abs(point[2]-pos[2]) > 12 or math.dist(pos, point) > 105:
+                if abs(point[2]-pos[2]) > 12 or math.dist(pos, point) > (145 if gearing and not threats else 105):
                     continue
                 if any(clear and math.dist(m["pos"][:2], point[:2]) < 32
                        for m, _, clear in threats[:3]):
@@ -331,6 +355,13 @@ class Bot:
             rx, ry = direction(p[0]-m["pos"][0], p[1]-m["pos"][1])
             side = 1 if math.sin(t*1.35+self.seed_angle) > 0 else -1
             retreat = 0.65 if d < 40 or pressured else 0.15
+            secondary = me["weapons"][1]
+            hp_fraction = me["hp"]/me["max_hp"]
+            if len(live) == 1 and not urgent and hp_fraction > 0.62 and not pressured:
+                if secondary and secondary["kind"] == "lightning" and 29 < d < 100:
+                    retreat = -2.8
+                elif m.get("hp", me["hp"]) < me["hp"]*0.64 and 25 < d < 100:
+                    retreat = -1.2
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live:
             return (0, 0), False, False
