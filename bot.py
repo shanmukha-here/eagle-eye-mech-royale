@@ -48,9 +48,9 @@ class Bot:
         self.unstick_until = -1
         self.rescue_until = -1
         self.blocked_count = 0
-        self.observed_duel = frozenset()
-        self.observed_duel_until = -1
-        self.duel_samples = {}
+        self.crossfire_goal = None
+        self.crossfire_key = ()
+        self.crossfire_refresh = -1
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -121,6 +121,51 @@ class Bot:
             if best is None or score < best[0]:
                 best = score, drop
         return best[1] if best else None
+
+    def _crossfire_cover(self, obs, threats):
+        me, zone = obs["self"], obs["zone"]
+        pos = me["pos"]
+        rivals = []
+        for actor, distance, clear in threats:
+            if clear and 36 < distance < 135:
+                bx = pos[0]-actor["pos"][0]
+                by = pos[1]-actor["pos"][1]
+                bearing = math.atan2(by,bx)
+                rivals.append((actor,distance,bearing))
+        if len(rivals) < 2:
+            return None
+        a, b = rivals[:2]
+        if abs(angle_delta(a[2], b[2])) < 0.70:
+            return None
+        key = a[0]["id"],b[0]["id"]
+        if key == self.crossfire_key and obs["t"] < self.crossfire_refresh:
+            return self.crossfire_goal
+        self.crossfire_key = key
+        self.crossfire_refresh = obs["t"] + 0.95
+        output = None
+        eyes = [(*r["pos"][:2],r["pos"][2]+1.5*self._actor_center(r)) for r,_,_ in (a,b)]
+        walk_radius = me["stats"]["radius"]+1.8
+        away = math.atan2(math.sin(a[2])+math.sin(b[2]),math.cos(a[2])+math.cos(b[2]))
+        for offset in (0,-0.5,0.5,-1,1,-1.55,1.55):
+            dx,dy = math.cos(away+offset),math.sin(away+offset)
+            for radius in (10,22,35):
+                xy = pos[0]+radius*dx, pos[1]+radius*dy
+                cell=self.arena.cell(*xy)
+                if cell is None or self.arena.clearance[cell]<walk_radius:
+                    continue
+                if math.dist(xy,zone["center"])>zone["radius"]-6:
+                    continue
+                height=self.arena.floor[cell]+me["stats"]["muzzle_height"]
+                shield=sum(not self.arena.line_open(eye,(*xy,height)) for eye in eyes)
+                if not shield:
+                    continue
+                score = shield*35-radius*.5
+                score += 0.15*(min(math.dist(xy,r["pos"][:2]) for r,_,_ in (a,b))-min(a[1],b[1]))
+                score -= max(0,math.dist(xy,zone["next_center"])-zone["next_radius"])*0.6
+                if output is None or score>output[0]:
+                    output=score,xy
+        self.crossfire_goal = output[1] if output else None
+        return self.crossfire_goal
 
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
@@ -376,85 +421,6 @@ class Bot:
         pair, expires = self.other_fight
         return t < expires and pair <= ids
 
-    def _nearby_duel(self, obs, threats):
-        me = obs["self"]
-        nearby = {m["id"]: (m, distance) for m, distance, clear in threats
-                  if clear and distance < 160}
-        previous = self.duel_samples
-        self.duel_samples = {rival_id: (m["hp"], obs["t"]) for rival_id,(m,_) in nearby.items()}
-        if len(nearby) < 2 or obs["alive"] <= 3 or self.damage_window:
-            return ()
-        t = obs["t"]
-        for beam in obs["beams"]:
-            if beam["by"] not in nearby or len(beam["path"]) < 2:
-                continue
-            for endpoint in beam["path"][1:]:
-                if math.dist(endpoint[:2], me["pos"][:2]) < 8:
-                    break
-                for rival, _ in nearby.values():
-                    if rival["id"] == beam["by"]:
-                        continue
-                    x, y, z = rival["pos"]
-                    if (math.hypot(x-endpoint[0],y-endpoint[1]) < 5 and
-                            z-1 <= endpoint[2] <= z+2*self._actor_center(rival)+1):
-                        self.observed_duel = frozenset((rival["id"], beam["by"]))
-                        self.observed_duel_until = t + 1.6
-        if t >= self.observed_duel_until:
-            # A fall in HP inside the zone plus another mech holding that angle
-            # catches gun duels which do not emit beams.
-            our_hits = {e.get("target") for e in obs["events"] if e["type"] == "hit"}
-            zone = obs["zone"]
-            for victim_id, (victim, _) in nearby.items():
-                old = previous.get(victim_id)
-                if (old is None or t-old[1] > 0.25 or old[0]-victim["hp"] < 30 or victim_id in our_hits
-                        or math.dist(victim["pos"][:2],zone["center"]) > zone["radius"]-7):
-                    continue
-                x,y,z = victim["pos"]
-                for other_id, (rival, _) in nearby.items():
-                    if other_id == victim_id:
-                        continue
-                    sx,sy,sz = rival["pos"]
-                    angle = math.atan2(y-sy, x-sx)
-                    if abs(angle_delta(angle, rival["aim"][0])) > 0.27:
-                        continue
-                    toward_me = math.atan2(me["pos"][1]-sy, me["pos"][0]-sx)
-                    if abs(angle_delta(toward_me,rival["aim"][0])) < 0.60:
-                        continue
-                    if self.arena.line_open((sx,sy,sz+self._actor_center(rival)*1.45),
-                                            (x,y,z+self._actor_center(victim))):
-                        self.observed_duel = frozenset((victim_id, other_id))
-                        self.observed_duel_until = t + 1.0
-                        break
-        if t >= self.observed_duel_until and obs["alive"] > 6:
-            # Mutual aim can reveal a duel before its next hit.
-            for first_id, (first, _) in nearby.items():
-                fx,fy,_ = first["pos"]
-                self_bearing = math.atan2(me["pos"][1]-fy, me["pos"][0]-fx)
-                if abs(angle_delta(self_bearing,first["aim"][0])) < 0.68:
-                    continue
-                for second_id, (second, _) in nearby.items():
-                    if second_id <= first_id:
-                        continue
-                    sx,sy,_ = second["pos"]
-                    if not 21 < math.hypot(sx-fx,sy-fy) < 108:
-                        continue
-                    angle = math.atan2(sy-fy,sx-fx)
-                    if (abs(angle_delta(angle,first["aim"][0])) > 0.21
-                            or abs(angle_delta(angle+math.pi,second["aim"][0])) > 0.21):
-                        continue
-                    their_bearing = math.atan2(me["pos"][1]-sy,me["pos"][0]-sx)
-                    if abs(angle_delta(their_bearing,second["aim"][0])) > 0.68:
-                        self.observed_duel = frozenset((first_id,second_id))
-                        self.observed_duel_until = t + 0.35
-                        break
-        pair = self.observed_duel
-        if t < self.observed_duel_until and pair <= nearby.keys():
-            # A nearby unrelated rival remains urgent even when two others are occupied.
-            if any(i not in pair and d < 85 for i, (_, d) in nearby.items()):
-                return ()
-            return tuple(nearby[i] for i in sorted(pair))
-        return ()
-
     def _loadout(self, obs, act):
         me = obs["self"]
         if obs["offer"]:
@@ -672,6 +638,8 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
+        if self.mode == "crossfire":
+            weight = 0.20
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
@@ -846,6 +814,13 @@ class Bot:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
             self.plan_at = t
             healing = False
+        if (not urgent and 12 < obs["alive"] and self.mech_kills == 0
+                and t < 110 and self.mode not in ("drop", "heal") and len(live) >= 2):
+            shelter = self._crossfire_cover(obs,threats)
+            if shelter:
+                self.goal, self.mode = shelter,"crossfire"
+                self.plan_at = t
+                healing = False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -878,27 +853,6 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
-        duel = self._nearby_duel(obs, threats) if not urgent else ()
-        if duel and self.mode not in ("drop", "heal"):
-            gun, side = me["weapons"]
-            weakest, distance = min(duel, key=lambda contact:contact[0]["hp"])
-            can_finish = (health := me["hp"]/me["max_hp"]) >= 0.66 and (
-                distance < 94 and gun["ammo"] >= 3 and gun["reload"] <= 0
-                and weakest["hp"] < 2.8*gun["stats"]["damage"])
-            if (side and side["kind"] == "laser" and side["cooldown"] <= 0.1
-                    and health >= 0.75 and distance < 110
-                    and weakest["hp"] < side["stats"]["damage"]*0.75):
-                can_finish = True
-            if can_finish:
-                target, center = weakest, self._actor_center(weakest)
-            elif not (side and side.get("charge",0)>0) and all(distance > 42 and abs(angle_delta(
-                    math.atan2(p[1]-enemy["pos"][1],p[0]-enemy["pos"][0]),enemy["aim"][0])) > 0.6
-                    for enemy, distance in duel):
-                if outside_next < -14 and all(distance > 50 for _, distance in duel):
-                    act["move"] = tuple(0.42*x for x in act["move"])
-                    self.previous_move = act["move"]
-                    act["boost"] = False
-                target, center = None, 0
         self._weapons(obs, target, center, act, urgent)
         return act
 
