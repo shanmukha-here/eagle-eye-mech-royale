@@ -91,12 +91,17 @@ class Bot:
         if urgent or not me["in_zone"]:
             return None
         health = me["hp"]/me["max_hp"]
-        if health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
+        committed = any(drop["holder"]==me["id"] and drop["progress"]>=0.8
+                        and math.dist(me["pos"][:2],drop["pos"][:2])<drop["radius"]
+                        for drop in obs["drops"])
+        if not committed and health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
             return None
         speed = max(1, me["stats"]["walk_speed"])
         best = None
         for drop in obs["drops"]:
             if drop["holder"] not in (None, me["id"]):
+                continue
+            if committed and drop["holder"]!=me["id"]:
                 continue
             point = drop["pos"][:2]
             cell = self.arena.cell(*point)
@@ -797,13 +802,6 @@ class Bot:
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
         self._weapons(obs, target, center, act, urgent)
-        gun=me["weapons"][0]
-        # The normal idle reload cutoff leaves 9 to 11 rounds of twelve after some kills.
-        # Refill between opponents only if the remaining contact is out of sight.
-        if (not urgent and not live and gun["reload"]<=0 and gun["ammo"]<gun["stats"]["mag"]
-                and self.mech_kills>0 and t-self.last_contact<0.8):
-            act["reload"]=True
-            act["fire"]=[False,False]
         return act
 
 
