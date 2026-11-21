@@ -95,7 +95,7 @@ class Bot:
         if urgent or not me["in_zone"]:
             return None
         health = me["hp"]/me["max_hp"]
-        if health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
+        if health >= 0.75:
             return None
         speed = max(1, me["stats"]["walk_speed"])
         best = None
@@ -837,13 +837,6 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
-        if (drop is not None and drop["holder"] == me["id"] and not live
-                and math.dist(p[:2],drop["pos"][:2]) < drop["radius"]):
-            # Avoid resetting repair for a drone or crate while a capture runs.
-            target, center = None, 0
-            gun = me["weapons"][0]
-            if gun["ammo"] < gun["stats"]["mag"] and gun["reload"] <= 0:
-                act["reload"] = True
         self._weapons(obs, target, center, act, urgent)
         return act
 
