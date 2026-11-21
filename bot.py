@@ -70,7 +70,7 @@ class Bot:
                 self.drones[m["id"]] = (m["pos"], t)
         self.drones = {k: v for k, v in self.drones.items() if t - v[1] < 30}
         for item_id, (point, _, seen) in list(self.loot.items()):
-            if t-seen > (48 if _ in ("laser","lightning") else 60 if _ == "crate" else 14) or (item_id not in visible and math.dist(point, pos) < 7):
+            if t-seen > (48 if _ in ("laser","lightning") else 60 if _ == "crate" and self.uncredited_eliminations >= 1 else 14) or (item_id not in visible and math.dist(point, pos) < 7):
                 del self.loot[item_id]
 
     def _visible_contacts(self, obs):
@@ -220,7 +220,7 @@ class Bot:
                     score = 86 + min(95, novelty) * 0.23 - distance * 0.06
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
-        self.farming = (not urgent and not threats and obs["t"] - self.last_contact > 4
+        self.farming = (self.uncredited_eliminations >= 1 and not urgent and not threats and obs["t"] - self.last_contact > 4
                         and obs["t"] < 140 and me["hp"] >= 0.7*me["max_hp"] and me["cubes"] < 10)
         if self.farming:
             # Before the first fight, nearby crates and drones are the cheapest cubes,
@@ -236,7 +236,7 @@ class Bot:
                     add(point[0]+ux*55, point[1]+uy*55, "drone", 140, detour=True)
         if not urgent and me["cubes"] < 12:
             for point, kind, seen in self.loot.values():
-                if kind == "cube" and math.dist(pos,point) < (70 if threats and me["hp"] > 0.4*me["max_hp"] else 33 if threats else 160) and abs(point[2]-pos[2]) < 5:
+                if kind == "cube" and math.dist(pos,point) < (33 if not self.uncredited_eliminations >= 1 else 70 if threats and me["hp"] > 0.4*me["max_hp"] else 33 if threats else 160) and abs(point[2]-pos[2]) < 5:
                     add(*point[:2],kind,240,detour=True)
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
@@ -740,7 +740,7 @@ class Bot:
                   outside_next*1.45/me["stats"]["walk_speed"] + 6 >= time_left))
         state = (zone["next_radius"], pressured, urgent, bool(live))
         separate_fight = self._can_recover_in_view(obs, threats) if live else False
-        loot_near = any(kind == "cube" and math.dist(p, point) < 160 and abs(point[2]-p[2]) < 5
+        loot_near = self.uncredited_eliminations >= 1 and any(kind == "cube" and math.dist(p, point) < 160 and abs(point[2]-p[2]) < 5
                         for point, kind, seen in self.loot.values())
         healing = (not loot_near and (not live or separate_fight) and not urgent and me["in_zone"] and outside_next < -4
                    and hp_fraction < 0.93 and (t < self.recover_until or separate_fight)
