@@ -61,7 +61,7 @@ class Bot:
                 visible.add(item_id)
                 self.loot[item_id] = (item["pos"], item.get("kind", value), t)
         for item_id, (point, _, seen) in list(self.loot.items()):
-            if t-seen > (48 if _ in ("laser","lightning") else 14) or (item_id not in visible and math.dist(point, pos) < 7):
+            if t-seen > 14 or (item_id not in visible and math.dist(point, pos) < 7):
                 del self.loot[item_id]
 
     def _visible_contacts(self, obs):
@@ -180,14 +180,14 @@ class Bot:
                 if self.arena.clearance[cell] < me["stats"]["radius"] + 2:
                     continue
                 distance = math.dist(pos, point)
-                if distance > 280:
+                if distance > 210:
                     continue
                 return_distance = max(0, math.dist(point[:2], zone["next_center"]) - radius + 9)
                 if distance + return_distance > travel_budget:
                     continue
                 if math.dist(point[:2], zone["center"]) > zone["radius"] - 6:
                     continue
-                score = 245 - distance * 0.22 - min(35, (obs["t"] - seen) * 0.4)
+                score = 220 - distance * 0.26 - min(35, (obs["t"] - seen) * 0.4)
                 goals.append((score, *point[:2], "laser"))
         if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
@@ -211,9 +211,14 @@ class Bot:
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
         if not urgent and me["cubes"] < 12:
-            for point, kind, seen in self.loot.values():
-                if kind == "cube" and math.dist(pos,point) < 33 and abs(point[2]-pos[2]) < 5:
-                    add(*point[:2],kind,240,detour=True)
+            available = [(point, seen) for point, kind, seen in self.loot.values()
+                         if kind == "cube" and obs["t"]-seen < 8 and abs(point[2]-pos[2]) < 5]
+            for point, seen in available:
+                distance = math.dist(pos,point)
+                if distance < 55:
+                    pile = sum(math.dist(point,q)<12 for q,_ in available)
+                    value = 218 + 13*min(4,pile) - .45*distance
+                    add(*point[:2],"cube",value,detour=True)
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
             values = {"cube": 44, "lightning": 37, "laser": 36, "crate": 21}
@@ -556,6 +561,8 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
+        if self.mode == "cube" and not urgent and goal_dist > 3 and len(live)<2:
+            weight = .1
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
@@ -655,6 +662,8 @@ class Bot:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
+        if self.mode=="cube" and goal_dist>4 and me["grounded"] and not self.blocked_count:
+            boosting=me["energy"]>26
         jumping = False
         if t < self.unstick_until and me["grounded"] and me["energy"] >= me["max_energy"]*0.9:
             jumping = True
