@@ -53,8 +53,6 @@ class Bot:
         self.next_screen = 0
         self.first_contact = None
         self.firing_window = 0
-        self.circuit_side = 1
-        self.circuit_until = -1
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -99,6 +97,43 @@ class Bot:
             return self.cfg["npc"]["height"] * 0.5
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
+
+    def _arc_engagement(self, obs, threats, urgent):
+        me = obs["self"]
+        weapon = me["weapons"][1]
+        if urgent or not weapon or weapon["kind"] != "lightning":
+            return None
+        live = [(m, dist) for m, dist, visible in threats if visible]
+        if len(live) != 1:
+            return None
+        rival, dist = live[0]
+        reach = weapon["stats"]["range"]
+        if dist > reach + 95 or me["energy"] < 12:
+            return None
+        if me["hp"] < 0.47 * me["max_hp"] and rival["hp"] > me["hp"]:
+            return None
+        pos = me["pos"]
+        ex, ey = rival["pos"][:2]
+        vx, vy = rival["vel"][:2]
+        approach = min(1.4, max(0, dist-reach) / me["stats"]["boost_speed"])
+        ex, ey = ex + vx*approach, ey + vy*approach
+        outward = math.atan2(pos[1]-ey, pos[0]-ex)
+        best = None
+        for offset in (0, -0.52, 0.52, -1.05, 1.05):
+            angle = outward + offset
+            xy = ex + 0.64*reach*math.cos(angle), ey + 0.64*reach*math.sin(angle)
+            c = self.arena.cell(*xy)
+            if c is None or self.arena.clearance[c] < me["stats"]["radius"]+2:
+                continue
+            if math.dist(xy, obs["zone"]["center"]) > obs["zone"]["radius"]-5:
+                continue
+            route_cost = math.dist(pos[:2], xy)
+            if not self.arena.line_open((*xy, self.arena.floor[c]+me["stats"]["muzzle_height"]),
+                                        (*rival["pos"][:2], rival["pos"][2]+self._actor_center(rival))):
+                route_cost += 40
+            if best is None or route_cost < best[0]:
+                best = route_cost, xy
+        return best[1] if best else None
 
     def _screen(self, obs, enemy):
         me = obs["self"]
@@ -624,24 +659,14 @@ class Bot:
             weight = 0.12
         if self.mode == "standoff":
             weight = 0.23
-        if len(live) == 1 and not urgent and not self.blocked_count:
-            rival, dist = live[0]
-            if 32 < dist < 145 and (self.damage_window or self.mode in ("heal", "cover")):
-                rx, ry = direction(p[0]-rival["pos"][0], p[1]-rival["pos"][1])
-                if t >= self.circuit_until:
-                    def lane(sign):
-                        lateral = -ry*sign, rx*sign
-                        room = self.arena.travel_room(p, lateral, 24, me["stats"])
-                        point = p[0]+lateral[0]*room, p[1]+lateral[1]*room
-                        c = self.arena.cell(*point)
-                        cover = (c is not None and not self.arena.line_open(
-                            (*rival["pos"][:2], rival["pos"][2]+7),
-                            (*point,self.arena.floor[c]+me["stats"]["muzzle_height"])))
-                        return room + 17*cover + 0.5*(me["vel"][0]*lateral[0]+me["vel"][1]*lateral[1])
-                    self.circuit_side = max((-1, 1), key=lane)
-                    self.circuit_until = t + 1.15
-                evade = direction(-ry*self.circuit_side + 0.18*rx, rx*self.circuit_side + 0.18*ry)
-                weight = 3.5
+        if self.mode == "arc" and live:
+            reach = me["weapons"][1]["stats"]["range"]
+            weight = 0.1 if live[0][1] > 0.86 * reach else 1.1
+        if self.mode == "counter" and live:
+            rx, ry = direction(p[0]-live[0][0]["pos"][0], p[1]-live[0][0]["pos"][1])
+            sign = 1 if me["vel"][1]*rx - me["vel"][0]*ry >= 0 else -1
+            evade = -ry*sign, rx*sign
+            weight = 2.0
         if self.mode == "screen":
             weight = 0.12
             if goal_dist < 2:
@@ -747,6 +772,8 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
+        if self.mode == "arc" and live and not self.blocked_count:
+            boosting = me["grounded"] and live[0][1] > 0.9*me["weapons"][1]["stats"]["range"] and me["energy"] > 21
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
@@ -843,6 +870,28 @@ class Bot:
                     self.goal = p[0]+8*dx, p[1]+8*dy
                     self.mode = "screen"
                     self.plan_at = t + 0.7
+        arc_goal = self._arc_engagement(obs, threats, urgent)
+        if arc_goal is not None:
+            self.goal, self.mode = arc_goal, "arc"
+            self.plan_at = t + 0.15
+            healing = False
+        # A lone pursuer can keep a damaged mech from ever starting regeneration.
+        # Hold the angle and finish the encounter if the weapon cycle favors us.
+        if len(threats) == 1 and threats[0][2] and not urgent:
+            enemy, dist, _ = threats[0]
+            gun, side = me["weapons"]
+            ready = gun["ammo"] * gun["stats"]["damage"]
+            if side and side["kind"] == "laser" and side["cooldown"] < 0.8:
+                ready += side["stats"]["damage"]
+            elif side and side["kind"] == "lightning" and dist < side["stats"]["range"]:
+                ready += 4 * side["stats"]["damage"]
+            if (self.mode in ("cover", "heal", "cube", "laser", "skirt", "screen")
+                    and ready > 0.52 * enemy["hp"] and me["hp"] > 0.43 * enemy["hp"]):
+                self.mode = "counter"
+                self.goal = tuple(p[:2])
+                self.plan_at = t
+                healing = False
+                tactical = False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
