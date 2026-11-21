@@ -48,9 +48,6 @@ class Bot:
         self.unstick_until = -1
         self.rescue_until = -1
         self.blocked_count = 0
-        self.hunter = None
-        self.shelter = self.shelter_key = None
-        self.shelter_at = self.peek_until = self.hide_until = 0
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -88,105 +85,6 @@ class Bot:
             return self.cfg["npc"]["height"] * 0.5
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
-
-    def _opening_goal(self, obs, rival, armed):
-        """Choose a sheltered node and a neighboring firing position on the arena graph."""
-        me, zone, arena = obs["self"], obs["zone"], self.arena
-        pos = me["pos"]
-        here = arena.nearest(pos)
-        if here is None:
-            return None
-        enemy = rival["pos"]
-        eye = (*enemy[:2], enemy[2] + self._actor_center(rival))
-        weapon_positions = [point for point, kind, seen in self.loot.values()
-                            if kind in ("lightning", "laser") and obs["t"] - seen < 18
-                            and abs(point[2] - pos[2]) < 8 and math.dist(point, pos) < 120]
-        nearest_weapon = min(weapon_positions, key=lambda q: math.dist(q, pos), default=None)
-        away = direction(pos[0] - enemy[0], pos[1] - enemy[1])
-        start_gap = math.dist(pos[:2], zone["next_center"])
-        candidates = []
-        for row in range(-4, 5):
-            for col in range(-4, 5):
-                gx, gy = here % arena.gw + col, here // arena.gw + row
-                if not (0 <= gx < arena.gw and 0 <= gy < arena.gh):
-                    continue
-                node = gy * arena.gw + gx
-                if arena.components[node] != arena.components[here] or not arena.links[node]:
-                    continue
-                xy = arena.points[node]
-                if math.dist(xy, zone["center"]) > zone["radius"] - 7:
-                    continue
-                dist = math.dist(xy, pos[:2])
-                depth = (xy[0] - pos[0])*away[0] + (xy[1] - pos[1])*away[1]
-                cost = dist + 0.8 * max(0, math.dist(xy, zone["next_center"]) - start_gap)
-                if not armed:
-                    cost -= 1.25 * depth
-                    if nearest_weapon is not None:
-                        cost += 1.25 * math.dist(xy, nearest_weapon[:2])
-                if arena.clearance[arena.cells[node]] < 20:
-                    cost -= 10
-                candidates.append((cost,node))
-        ranked = sorted(candidates)
-        for _, node in ranked[:32]:
-            xy = arena.points[node]
-            torso = (*xy, arena.floor[arena.cells[node]] + me["stats"]["muzzle_height"])
-            if arena.line_open(eye, torso):
-                continue
-            if not armed:
-                if nearest_weapon and math.dist(nearest_weapon[:2], xy) < 16:
-                    return tuple(nearest_weapon[:2]), None
-                return xy, None
-            for neighbor, room in arena.links[node]:
-                peek = arena.points[neighbor]
-                if math.dist(peek, zone["center"]) < zone["radius"] - 6 and arena.line_open(
-                        eye, (*peek, arena.floor[arena.cells[neighbor]] + me["stats"]["muzzle_height"])):
-                    return xy, peek
-        if not armed and ranked:
-            if nearest_weapon and math.dist(pos, nearest_weapon) < 22:
-                return tuple(nearest_weapon[:2]), None
-            return arena.points[ranked[0][1]], None
-        return None
-
-    def _opening(self, obs, threats, urgent):
-        t, me = obs["t"], obs["self"]
-        if threats:
-            self.hunter = (threats[0][0], t)
-        if not self.hunter or urgent:
-            return None
-        rival, seen = self.hunter
-        armed = me["weapons"][1] is not None
-        if armed and not (me["weapons"][0].get("reload", 0) or self.damage_window or self.peek_until):
-            return None
-        if not armed and getattr(self, "escape_until", 0) <= t:
-            if t < getattr(self, "escape_again", 0):
-                return None
-            self.escape_until, self.escape_again = t + 2.5, t + 6
-        if (t-seen > (5 if armed else 3) or self.mech_kills > 1
-                or (armed and t > 125) or len(threats) > 1):
-            return None
-        key = rival["id"], armed
-        if t >= self.shelter_at or key != self.shelter_key:
-            self.shelter = self._opening_goal(obs, rival, armed)
-            self.shelter_key = key
-            self.shelter_at = t + 2.0
-        if not self.shelter:
-            return None
-        hidden, peek = self.shelter
-        if not armed:
-            if not any(clear for _, _, clear in threats) or math.dist(hidden, me["pos"][:2]) < 8:
-                return None
-            if self.mode in ("laser", "lightning") and math.dist(self.goal, me["pos"][:2]) < 50:
-                hidden = self.goal
-            return hidden, "withdraw"
-        exposed = any(clear for _, _, clear in threats)
-        if rival.get("hp", 1500) < 0.32 * me["max_hp"] and exposed:
-            return None
-        if self.peek_until and t >= self.peek_until:
-            self.peek_until = 0
-            self.hide_until = t + 1.8
-        if math.dist(me["pos"][:2], hidden) < 8 and t >= self.hide_until and not self.peek_until:
-            self.peek_until = t + min(4.5, math.dist(hidden, peek) / me["stats"]["walk_speed"] + 1.2)
-        return (peek, "peek") if self.peek_until else (hidden, "withdraw")
 
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
@@ -367,6 +265,19 @@ class Bot:
                 add(px+dx*spacing,py+dy*spacing,"duel",bonus,detour=True)
         if not urgent and radius >= 40 and self.uncredited_eliminations >= 1:
             goals.extend(self._perimeter_goals(obs, threats))
+        sidearm = me["weapons"][1]
+        if not urgent and sidearm and sidearm["kind"] == "laser" and threats:
+            enemy, distance, clear = threats[0]
+            if clear and distance < 225 and enemy["hp"] > 0.28 * me["max_hp"]:
+                # Hold laser reach and keep a second route into the next circle.
+                ex, ey = enemy["pos"][:2]
+                away = math.atan2(y-ey, x-ex)
+                for offset in (0, -0.52, 0.52, -1.05, 1.05):
+                    angle = away + offset
+                    length = min(60, max(14, 238-distance))
+                    px, py = x+length*math.cos(angle), y+length*math.sin(angle)
+                    if math.dist((px, py), zone["center"]) < zone["radius"] - 8:
+                        add(px, py, "standoff", 185)
         if goals:
             _, gx, gy, self.mode = max(goals)
             self.goal = (gx, gy)
@@ -655,6 +566,8 @@ class Bot:
                 weight = 0.23
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and not urgent:
             weight = 0.12
+        if self.mode == "standoff":
+            weight = 0.23
         if self.mode == "skirt" and goal_dist > 9 and not urgent:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
@@ -669,10 +582,6 @@ class Bot:
                     if goal_dist > d["radius"]*0.45:
                         return direct, False, False
                     return (0, 0), False, False
-        if self.mode in ("peek", "withdraw"):
-            weight = 0.08
-            if goal_dist < 3:
-                return (0, 0), False, False
         if zone["radius"] <= 5 and zone["next_radius"] == 0:
             weight = 0
         path_scale = 0.0 if endpoint else 1.0
@@ -832,13 +741,6 @@ class Bot:
             self._choose_goal(obs, threats, pressured, urgent)
             self.plan_state = state
             self.plan_at = t + (0.8 if pressured or urgent else 1.4)
-        opening = self._opening(obs, threats, urgent)
-        if opening:
-            self.goal, self.mode = opening
-            healing = False
-        elif getattr(self, "opening_active", False):
-            self._choose_goal(obs, threats, pressured, urgent)
-        self.opening_active = bool(opening)
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -852,17 +754,6 @@ class Bot:
             move, boost, jump = (0, 0), False, False
         else:
             move, boost, jump = self._move(obs, threats, urgent, pressured)
-        if (live and not healing and not urgent and not self.blocked_count
-                and self.mode not in ("laser", "lightning", "drop", "cube")
-                and math.dist(live[0]["pos"], p) < 205):
-            cell = self.arena.cell(*p[:2])
-            if cell is not None and (p[2] >= self.arena.top[cell] or self.arena.bottom[cell] > p[2] + 18):
-                # Change elevation during a visible duel, then coast down to save energy.
-                if me["grounded"] and me["energy"] > 25:
-                    jump = True
-                    self.hop_until = t + 1.6
-                if not me["grounded"]:
-                    boost = t < getattr(self, "hop_until", 0) and me["energy"] > 18
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
@@ -876,8 +767,6 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
-        if opening and self.mode == "withdraw":
-            target = None
         self._weapons(obs, target, center, act, urgent)
         return act
 
