@@ -22,6 +22,7 @@ class Bot:
         self.arena = Arena(hello["map"]["dir"], self.cfg["mech"])
         self.nav = Navigator(self.arena)
         self.seed_angle = math.tau * ((hello["seed"] % 10007) / 10007)
+        self.drones = {}
         self.previous_target = None
         self.charge_since = {}
         self.searched = set()
@@ -52,9 +53,6 @@ class Bot:
         self.escape_seen = -100
         self.next_exit = -1
         self.exit_point = None
-        self.crossfire_goal = None
-        self.crossfire_key = ()
-        self.crossfire_refresh = -1
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -67,8 +65,12 @@ class Bot:
                 item_id = item["id"]
                 visible.add(item_id)
                 self.loot[item_id] = (item["pos"], item.get("kind", value), t)
+        for m in obs["mechs"]:
+            if m["kind"] == "npc":
+                self.drones[m["id"]] = (m["pos"], t)
+        self.drones = {k: v for k, v in self.drones.items() if t - v[1] < 30}
         for item_id, (point, _, seen) in list(self.loot.items()):
-            if t-seen > (48 if _ in ("laser","lightning") else 14) or (item_id not in visible and math.dist(point, pos) < 7):
+            if t-seen > (48 if _ in ("laser","lightning") else 60 if _ == "crate" else 14) or (item_id not in visible and math.dist(point, pos) < 7):
                 del self.loot[item_id]
 
     def _visible_contacts(self, obs):
@@ -92,84 +94,6 @@ class Bot:
             return self.cfg["npc"]["height"] * 0.5
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
-
-    def _repair_drop(self, obs, threats, urgent):
-        me, zone = obs["self"], obs["zone"]
-        if urgent or not me["in_zone"]:
-            return None
-        health = me["hp"]/me["max_hp"]
-        if health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
-            return None
-        speed = max(1, me["stats"]["walk_speed"])
-        best = None
-        for drop in obs["drops"]:
-            if drop["holder"] not in (None, me["id"]):
-                continue
-            point = drop["pos"][:2]
-            cell = self.arena.cell(*point)
-            if cell is None or abs(drop["pos"][2]-self.arena.floor[cell]) > 5:
-                continue
-            distance = math.dist(me["pos"][:2],point)
-            eta = max(0,distance-drop["radius"]*.5)*1.25 / speed
-            finish = max(eta,drop["lands_in"])+drop["capture_s"]-drop["progress"]
-            if finish > (24 if health < 0.7 else 16):
-                continue
-            inside_next = math.dist(zone["next_center"],point) < zone["next_radius"]-drop["radius"]
-            if not inside_next and zone["shrink_end"]-obs["t"] < finish+12:
-                continue
-            if math.dist(zone["center"],point) > zone["radius"]-drop["radius"]:
-                continue
-            if any(math.dist(m["pos"][:2],point)/speed < finish+1.2 for m,_,_ in threats):
-                continue
-            score = finish + .01*distance
-            if best is None or score < best[0]:
-                best = score, drop
-        return best[1] if best else None
-
-    def _crossfire_cover(self, obs, threats):
-        me, zone = obs["self"], obs["zone"]
-        pos = me["pos"]
-        rivals = []
-        for actor, distance, clear in threats:
-            if clear and 36 < distance < 135:
-                bx = pos[0]-actor["pos"][0]
-                by = pos[1]-actor["pos"][1]
-                bearing = math.atan2(by,bx)
-                rivals.append((actor,distance,bearing))
-        if len(rivals) < 2:
-            return None
-        a, b = rivals[:2]
-        if abs(angle_delta(a[2], b[2])) < 0.70:
-            return None
-        key = a[0]["id"],b[0]["id"]
-        if key == self.crossfire_key and obs["t"] < self.crossfire_refresh:
-            return self.crossfire_goal
-        self.crossfire_key = key
-        self.crossfire_refresh = obs["t"] + 0.95
-        output = None
-        eyes = [(*r["pos"][:2],r["pos"][2]+1.5*self._actor_center(r)) for r,_,_ in (a,b)]
-        walk_radius = me["stats"]["radius"]+1.8
-        away = math.atan2(math.sin(a[2])+math.sin(b[2]),math.cos(a[2])+math.cos(b[2]))
-        for offset in (0,-0.5,0.5,-1,1,-1.55,1.55):
-            dx,dy = math.cos(away+offset),math.sin(away+offset)
-            for radius in (10,22,35):
-                xy = pos[0]+radius*dx, pos[1]+radius*dy
-                cell=self.arena.cell(*xy)
-                if cell is None or self.arena.clearance[cell]<walk_radius:
-                    continue
-                if math.dist(xy,zone["center"])>zone["radius"]-6:
-                    continue
-                height=self.arena.floor[cell]+me["stats"]["muzzle_height"]
-                shield=sum(not self.arena.line_open(eye,(*xy,height)) for eye in eyes)
-                if not shield:
-                    continue
-                score = shield*35-radius*.5
-                score += 0.15*(min(math.dist(xy,r["pos"][:2]) for r,_,_ in (a,b))-min(a[1],b[1]))
-                score -= max(0,math.dist(xy,zone["next_center"])-zone["next_radius"])*0.6
-                if output is None or score>output[0]:
-                    output=score,xy
-        self.crossfire_goal = output[1] if output else None
-        return self.crossfire_goal
 
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
@@ -296,9 +220,23 @@ class Bot:
                     score = 86 + min(95, novelty) * 0.23 - distance * 0.06
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
+        self.farming = (not urgent and not threats and obs["t"] - self.last_contact > 4
+                        and obs["t"] < 140 and me["hp"] >= 0.7*me["max_hp"] and me["cubes"] < 10)
+        if self.farming:
+            # Before the first fight, nearby crates and drones are the cheapest cubes,
+            # and each early cube raises HP and damage for every later exchange.
+            for point, kind, seen in self.loot.values():
+                if kind == "crate" and abs(point[2]-pos[2]) < 6 and math.dist(pos, point) < 260:
+                    add(*point[:2], "harvest", 150, detour=True)
+                if kind == "cube" and abs(point[2]-pos[2]) < 6 and math.dist(pos, point) < 90:
+                    add(*point[:2], "cube", 240, detour=True)
+            for point, seen in self.drones.values():
+                if math.dist(pos[:2], point[:2]) < 260:
+                    ux, uy = direction(x-point[0], y-point[1])
+                    add(point[0]+ux*55, point[1]+uy*55, "drone", 140, detour=True)
         if not urgent and me["cubes"] < 12:
             for point, kind, seen in self.loot.values():
-                if kind == "cube" and math.dist(pos,point) < 33 and abs(point[2]-pos[2]) < 5:
+                if kind == "cube" and math.dist(pos,point) < (70 if threats and me["hp"] > 0.4*me["max_hp"] else 33 if threats else 160) and abs(point[2]-pos[2]) < 5:
                     add(*point[:2],kind,240,detour=True)
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
@@ -470,10 +408,17 @@ class Bot:
             return None, 0
         if npcs:
             return npcs[0], self._actor_center(npcs[0])
+        if getattr(self, "farming", False):
+            p = me["pos"]
+            muzzle = (p[0], p[1], p[2]+me["stats"]["muzzle_height"])
+            for m in sorted((m for m in obs["mechs"] if m["kind"] == "npc"), key=lambda m: math.dist(m["pos"], p)):
+                if math.dist(m["pos"], p) < 130 and self.arena.line_open(
+                        muzzle, (*m["pos"][:2], m["pos"][2]+self._actor_center(m))):
+                    return m, self._actor_center(m)
         for item in sorted(obs["crates"], key=lambda c: math.dist(c["pos"], me["pos"])):
             p, q = me["pos"], item["pos"]
             h = self.cfg["crates"]["height"]*0.5
-            if math.dist(p, q) < 64 and self.arena.line_open(
+            if math.dist(p, q) < (120 if getattr(self, 'farming', False) else 64) and self.arena.line_open(
                     (p[0], p[1], p[2]+me["stats"]["muzzle_height"]), (q[0], q[1], q[2]+h)):
                 return item, h
         return None, 0
@@ -644,8 +589,6 @@ class Bot:
             weight = 0.42 if goal_dist > 15 else 0.95
         if self.mode == "exit":
             weight = 0.16
-        if self.mode == "crossfire":
-            weight = 0.20
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
@@ -797,7 +740,9 @@ class Bot:
                   outside_next*1.45/me["stats"]["walk_speed"] + 6 >= time_left))
         state = (zone["next_radius"], pressured, urgent, bool(live))
         separate_fight = self._can_recover_in_view(obs, threats) if live else False
-        healing = ((not live or separate_fight) and not urgent and me["in_zone"] and outside_next < -4
+        loot_near = any(kind == "cube" and math.dist(p, point) < 160 and abs(point[2]-p[2]) < 5
+                        for point, kind, seen in self.loot.values())
+        healing = (not loot_near and (not live or separate_fight) and not urgent and me["in_zone"] and outside_next < -4
                    and hp_fraction < 0.93 and (t < self.recover_until or separate_fight)
                    and t-self.last_drone[1] > 2)
         # Prefer a safe, ongoing capture to a slower natural repair.
@@ -850,18 +795,6 @@ class Bot:
                 self.goal, self.mode = self.exit_point, "exit"
                 healing = False
                 self.plan_at = t
-        drop = self._repair_drop(obs, threats, urgent)
-        if drop is not None:
-            self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
-            self.plan_at = t
-            healing = False
-        if (not urgent and 12 < obs["alive"] and self.mech_kills == 0
-                and t < 110 and self.mode not in ("drop", "heal") and len(live) >= 2):
-            shelter = self._crossfire_cover(obs,threats)
-            if shelter:
-                self.goal, self.mode = shelter,"crossfire"
-                self.plan_at = t
-                healing = False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -875,12 +808,6 @@ class Bot:
             move, boost, jump = (0, 0), False, False
         else:
             move, boost, jump = self._move(obs, threats, urgent, pressured)
-        if drop is not None:
-            distance = math.dist(p[:2], drop["pos"][:2])
-            if distance < drop["radius"]*0.75:
-                move, boost, jump = (0, 0), False, False
-            elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
-                boost = True
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
@@ -890,7 +817,7 @@ class Bot:
         else:
             sounds = [s for s in obs["sounds"] if s["kind"] in ("gun", "laser", "lightning", "mortar", "laser_charge")]
             yaw = sounds[-1]["bearing"] if sounds else self.seed_angle + t*0.95
-        if target is None and me["weapons"][1] is None and t < 70 and t - self.last_contact > 1:
+        if target is None and ((me["weapons"][1] is None and t < 70) or getattr(self, "farming", False)) and t - self.last_contact > 1:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
