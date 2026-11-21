@@ -309,13 +309,14 @@ class Match:
                     "age": self.t - when,
                 }
             )
-        beams = [
-            {"by": i, "kind": kind, "path": path, "age": self.t - when}
-            for i, kind, path, when in self.beams
-            if i != p.id
-            and self.t - when <= 0.101
-            and (self.visible(p, path[0]) or self.visible(p, path[-1]))
-        ]
+        beams = []
+        for i, kind, path, when in self.beams:
+            if i == p.id or self.t - when > 0.101:
+                continue
+            points = (*path, *(tuple((u + v) * 0.5 for u, v in zip(a, b))
+                                for a, b in zip(path, path[1:])))
+            if any(self.visible(p, point, 0) for point in points):
+                beams.append({"by": i, "kind": kind, "path": path, "age": self.t - when})
         bullets = [
             {"id": b[0], "kind": b[1], "pos": b[3], "vel": b[4]}
             for b in self.bullets
@@ -413,7 +414,8 @@ class Match:
                 vel[2] = 0
             pos[2] = nz
         s["grounded"] = grounded
-        if math.hypot(vel[0], vel[1]) > 5 and self.t - p.last_step >= self.cfg["sound"]["step_every"]:
+        if (math.hypot(vel[0], vel[1]) > self.cfg["sound"]["step_speed"]
+                and self.t - p.last_step >= self.cfg["sound"]["step_every"]):
             self.sound("boost" if boost and grounded else "step" if grounded else "jet", p.id, pos)
             p.last_step = self.t
         s["in_zone"] = math.dist(pos[:2], self.zone["center"]) <= self.zone["radius"]
@@ -542,6 +544,7 @@ class Match:
                     continue
                 if (a.get("reload") or w["ammo"] <= 0) and w["ammo"] < st["mag"]:
                     w["reload"] = st["reload"]
+                    self.sound("reload", p.id, s["pos"])
                     continue
             if w["cooldown"] > 1e-8:
                 continue
@@ -550,7 +553,10 @@ class Match:
                 if p.silenced > self.t:
                     w["charge"] = 0
                     continue
-                if trig and w["charge"] < st["charge"] + st["hold_s"]:
+                if trig and w["charge"] <= 0:
+                    self.sound("laser_charge", p.id, s["pos"])
+                needs_minimum = 0 < w["charge"] < st["min_charge"] - 1e-8
+                if needs_minimum or (trig and w["charge"] < st["charge"] + st["hold_s"] - 1e-8):
                     w["charge"] += DT
                     continue
                 if w["charge"] <= 0:
@@ -634,8 +640,11 @@ class Match:
                     self.hurt(p.id, i, dmg * st["chain_falloff"] ** jump, k, path[-1])
                     path.append(mid)
                     seen.add(i)
-                if len(path) > 1:
-                    self.beams.append((p.id, k, path, self.t))
+                if len(path) == 1:
+                    delta = [d * st["range"] for d in aim]
+                    fraction = min(1, self.geo.block(*muzzle, *delta, 0))
+                    path.append([x + d * fraction for x, d in zip(muzzle, delta)])
+                self.beams.append((p.id, k, path, self.t))
 
     def fly(self):
         remain = []
