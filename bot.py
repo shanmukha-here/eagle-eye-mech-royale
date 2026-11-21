@@ -91,17 +91,12 @@ class Bot:
         if urgent or not me["in_zone"]:
             return None
         health = me["hp"]/me["max_hp"]
-        committed = any(drop["holder"]==me["id"] and drop["progress"]>=0.8
-                        and math.dist(me["pos"][:2],drop["pos"][:2])<drop["radius"]
-                        for drop in obs["drops"])
-        if not committed and health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
+        if health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
             return None
         speed = max(1, me["stats"]["walk_speed"])
         best = None
         for drop in obs["drops"]:
             if drop["holder"] not in (None, me["id"]):
-                continue
-            if committed and drop["holder"]!=me["id"]:
                 continue
             point = drop["pos"][:2]
             cell = self.arena.cell(*point)
@@ -123,6 +118,32 @@ class Bot:
             if best is None or score < best[0]:
                 best = score, drop
         return best[1] if best else None
+
+    def _covered_ring(self, drop, obs, threats):
+        center=tuple(drop["pos"][:2])
+        me=obs["self"]
+        if not threats or math.dist(center,me["pos"][:2]) > 36:
+            return center
+        # Favor a covered point still close enough for the existing capture model.
+        sources=[(*m["pos"][:2],m["pos"][2]+self._actor_center(m)*1.5)
+                 for m,_,_ in threats[:2]]
+        best=None
+        for i in range(9):
+            angle=math.tau*i/8
+            radius=drop["radius"]*.48 if i<8 else 0
+            point=center[0]+radius*math.cos(angle),center[1]+radius*math.sin(angle)
+            cell=self.arena.cell(*point)
+            if cell is None or self.arena.clearance[cell]<me["stats"]["radius"]+0.5:
+                continue
+            z=self.arena.floor[cell]
+            if abs(z-drop["pos"][2]) > 4:
+                continue
+            cover=sum(not self.arena.line_open(src,(*point,z+me["stats"]["muzzle_height"]))
+                      for src in sources)
+            score=cover*15 - .25*math.dist(point,me["pos"][:2]) - radius*.18
+            if best is None or score>best[0]:
+                best=score,point,cover
+        return best[1] if best and best[2] else center
 
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
@@ -766,7 +787,7 @@ class Bot:
             self.plan_at = t + (0.8 if pressured or urgent else 1.4)
         drop = self._repair_drop(obs, threats, urgent)
         if drop is not None:
-            self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
+            self.goal, self.mode = self._covered_ring(drop,obs,threats), "drop"
             self.plan_at = t
             healing = False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
@@ -784,7 +805,8 @@ class Bot:
             move, boost, jump = self._move(obs, threats, urgent, pressured)
         if drop is not None:
             distance = math.dist(p[:2], drop["pos"][:2])
-            if distance < drop["radius"]*0.75:
+            hold_radius=drop["radius"]*.75 if self.goal==tuple(drop["pos"][:2]) else 2
+            if math.dist(p[:2],self.goal) < hold_radius:
                 move, boost, jump = (0, 0), False, False
             elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
                 boost = True
