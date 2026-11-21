@@ -338,7 +338,7 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm", "p4test", "p5test"),
+        choices=("holdout", "confirm", "p4test", "p5test", "p5final"),
         default="p5final",
         help="test block for --split all",
     )
