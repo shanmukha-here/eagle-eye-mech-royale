@@ -764,6 +764,25 @@ class Bot:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
             self.plan_at = t
             healing = False
+        # An isolated kill can leave enough cubes to restore HP before the next rival arrives.
+        if (drop is None and not urgent and hp_fraction < 0.73 and not live
+                and any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"])):
+            close_cubes=[c for c in obs["cubes"] if math.dist(c["pos"],p)<19
+                         and abs(c["pos"][2]-p[2])<4]
+            for cube in sorted(close_cubes,key=lambda c:math.dist(c["pos"],p)):
+                xy=tuple(cube["pos"][:2])
+                cell=self.arena.cell(*xy)
+                if cell is None or self.arena.clearance[cell]<me["stats"]["radius"]+1.8:
+                    continue
+                if math.dist(xy,zone["next_center"])>=zone["next_radius"]-4:
+                    continue
+                if any(math.dist(xy,m["pos"][:2])<32 for m,_,_ in threats):
+                    continue
+                self.goal,self.mode=xy,"cube"
+                self.plan_at=t+0.45
+                self.recover_until=min(self.recover_until,t+0.35)
+                healing=False
+                break
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -796,13 +815,6 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
-        # Use an uncontested capture to prepare for contact while the ring is restoring us.
-        if (drop is not None and math.dist(p[:2],drop["pos"][:2]) < drop["radius"]*.75
-                and not live and drop["holder"] in (None,me["id"])):
-            gun=me["weapons"][0]
-            if gun["ammo"] < gun["stats"]["mag"] and gun["reload"]<=0:
-                act["reload"]=True
-            target=None
         self._weapons(obs, target, center, act, urgent)
         return act
 
