@@ -68,6 +68,9 @@ SPLITS = {
     "p10test": (3100000, 240),
     "p10rules": (3200000, 400),
     "p10combine": (3300000, 400),
+    "p11diag": (3400000, 400),
+    "p11dev": (3500000, 80),
+    "p11test": (3600000, 240),
 }
 DEFAULT_MIX = 3
 
@@ -374,8 +377,8 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test", "p9test", "p10test", "p10combine"),
-        default="p10test",
+        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test", "p9test", "p10test", "p10combine", "p11test"),
+        default="p11test",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
@@ -452,7 +455,7 @@ def main():
             initargs=(cpus,),
         ) as pool:
             for split in (
-                ({"p10test": "p10dev", "p10combine": "p10rules", "p9test": "p9dev", "p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
+                ({"p11test": "p11dev", "p10test": "p10dev", "p10combine": "p10rules", "p9test": "p9dev", "p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
                 if args.split == "all"
                 else [args.split]
             ):
