@@ -454,10 +454,11 @@ def main():
                         "worse": sum(d < 0 for d in delta),
                     }
                     out["paired_gain_ci95"] = interval(delta)
-                    if split == "confirm" and n == 400:
-                        # Two-sided 97.5% Student critical value rounded upward for df=399.
+                    critical = {("confirm", 400): 2.251, ("p5final", 800): 2.246}.get((split, n))
+                    if critical is not None:
+                        # Round each predeclared two-sided 97.5% Student critical value upward.
                         mean = statistics.mean(delta)
-                        half = 2.251 * statistics.stdev(delta) / math.sqrt(n)
+                        half = critical * statistics.stdev(delta) / math.sqrt(n)
                         out["paired_gain_ci97_5"] = [mean, mean - half, mean + half]
                         print(split, "paired 97.5% interval", out["paired_gain_ci97_5"], flush=True)
                     print(split, "paired candidate minus", reference, out["paired_gain_ci95"], flush=True)
