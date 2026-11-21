@@ -79,7 +79,7 @@ class Bot:
             center = (pm[0], pm[1], pm[2]+self._actor_center(m))
             if m["kind"] == "mech":
                 threats.append((m, math.dist(p, pm), self.arena.line_open(muzzle, center)))
-            elif len(npcs) < 2 and math.dist(p, pm) < 50 and self.arena.line_open(muzzle, center):
+            elif len(npcs) < 2 and math.dist(p, pm) < (145 if obs["t"] < 95 else 50) and self.arena.line_open(muzzle, center):
                 npcs.append(m)
         return threats, npcs
 
@@ -185,6 +185,8 @@ class Bot:
         exposed = any(clear for _, _, clear in threats)
         if rival.get("hp", 1500) < 0.32 * me["max_hp"] and exposed:
             return None
+        if self.peek_until and armed and me["weapons"][1]["cooldown"] > 1.1:
+            self.peek_until = t
         if self.peek_until and t >= self.peek_until:
             self.peek_until = 0
             self.hide_until = t + 1.8
@@ -395,6 +397,15 @@ class Bot:
                     add(*point[:2], "crate", 152 - 0.2 * (obs["t"] - seen), detour=True)
                 elif kind == "cube" and abs(point[2]-pos[2]) < 5 and math.dist(pos, point) < 90:
                     add(*point[:2], "cube", 270 - 0.2 * (obs["t"] - seen), detour=True)
+        if not urgent and obs["t"] < 95 and me["cubes"] < 7:
+            for drone in obs["mechs"]:
+                if drone["kind"] == "npc" and not threats and math.dist(drone["pos"], pos) < 135:
+                    add(*drone["pos"][:2], "drone", 157, detour=True)
+            for point, kind, seen in self.loot.values():
+                if kind != "cube" or abs(point[2] - pos[2]) > 5 or math.dist(point, pos) > 105:
+                    continue
+                if not any(clear and math.dist(enemy["pos"], point) < 30 for enemy, _, clear in threats):
+                    add(*point[:2], "cube", 295, detour=True)
         if goals:
             _, gx, gy, self.mode = max(goals)
             self.goal = (gx, gy)
@@ -792,6 +803,8 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning", "mortar") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
+        if not live and self.mode in ("crate", "explore", "cube", "drone", "mortar") and goal_dist > 8:
+            boosting = bool(me["grounded"] and me["energy"] > 34 and not self.blocked_count)
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
