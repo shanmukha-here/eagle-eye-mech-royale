@@ -27,6 +27,11 @@ ROOT = Path(__file__).resolve().parent
 REFS = {
     "phase1": "f4e346ad250f0ca69a4803e760e2ab482f2f4cd6",
     "phase2": "30cd61654c5d03c2a3131448259c9b4603796fd5",
+    "phase3": "c9901fa16f407aa222df52c184f858466bda13a4",
+}
+OPPONENT_REVISIONS = {
+    "circle": "376dc9cd0be14ead83053b78ad6edf8a77047fd9",
+    "equipment": "8165f67717e9c8c706933ee7e3110875d6b10268",
 }
 SPLITS = {
     "cal": (170000, 96),
@@ -35,6 +40,9 @@ SPLITS = {
     "devcheck": (520000, 256),
     "encounter-dev": (620000, 256),
     "confirm": (960000, 400),
+    "p4dev": (1200000, 96),
+    "p4verify": (1300000, 200),
+    "p4test": (1400000, 320),
 }
 DEFAULT_MIX = 3
 
@@ -73,7 +81,9 @@ def prepare(args):
     # Reporting and calibration metadata cannot change an existing match result.
     inputs.remove(Path(__file__))
     h = hashlib.sha256(
-        digest(inputs).encode() + inspect.getsource(run_match).encode() + str(REFS).encode()
+        digest(inputs).encode()
+        + inspect.getsource(run_match).encode()
+        + str((REFS, OPPONENT_REVISIONS)).encode()
     )
     ENGINE = h.hexdigest()[:20] + ("-docker" if args.docker else "-native")
     lib = cache / ("geometry-" + digest([ROOT / "local_sim/geometry.c"]) + ".so")
@@ -88,14 +98,17 @@ def prepare(args):
     FACTORIES = {}
     CMD = {}
     HASHES = {}
-    for name in [*REFS, "candidate"]:
+    revisions = {**REFS, **OPPONENT_REVISIONS}
+    for name in [*revisions, "candidate"]:
         if name == "candidate":
             folder = args.candidate_dir.resolve()
         else:
-            folder = cache / "sources" / REFS[name]
+            folder = cache / "sources" / revisions[name]
             folder.mkdir(parents=True, exist_ok=True)
             for file in ("arena.py", "bot.py", "Dockerfile", ".dockerignore"):
-                data = subprocess.check_output(["git", "-C", str(ROOT), "show", REFS[name] + ":" + file])
+                data = subprocess.check_output(
+                    ["git", "-C", str(ROOT), "show", revisions[name] + ":" + file]
+                )
                 if not (folder / file).exists() or (folder / file).read_bytes() != data:
                     (folder / file).write_bytes(data)
         code = digest(
@@ -112,10 +125,12 @@ def prepare(args):
         if name == "phase1":
             frozen = load_module("localboard_fixed_arena", folder / "arena.py")
             GEO = Map(kit / "arena", HELLO["config"], lib, frozen.Arena)
-        if name in REFS:
+        if name in revisions:
             m = load_module("opponent_" + name, folder / "bot.py")
             m.Arena = lambda *_: GEO.arena
             FACTORIES[name] = m.Bot
+        if name not in args.models:
+            continue
         if args.docker:
             tag = "eagle-eye-localboard:" + code
             subprocess.run(
@@ -158,8 +173,7 @@ def prepare(args):
         FACTORIES["starter"] = load_module("kit_example", kit / "python/example_bot.py").Bot
     finally:
         mechfight.run = saved
-    OUT = cache / "matches" / ENGINE / ("ffa" if args.ffa else "squad") / str(args.mix)
-    OUT.mkdir(parents=True, exist_ok=True)
+    OUT = cache / "matches" / ENGINE
     if not args.skip_gate:
         for key in dict.fromkeys(HASHES[n] for n in args.models):
             name = next(n for n in args.models if HASHES[n] == key)
@@ -184,11 +198,12 @@ def pin_worker(cpus):
 
 
 def run_match(job):
-    seed, name, mix, ffa, docker = job
-    dest = OUT / (HASHES[name] + "-" + str(seed) + ".json")
+    seed, name, mix, pool_name, docker = job
+    ffa = pool_name != "practice"
+    dest = OUT / pool_name / str(mix) / (HASHES[name] + "-" + str(seed) + ".json")
     if dest.exists():
         return json.loads(dest.read_text())
-    g = Match(GEO, HELLO, seed, roster(mix), ffa)
+    g = Match(GEO, HELLO, seed, roster(mix, strong=pool_name == "strong"), ffa)
     subject = g.players[g.subject]
 
     def hello(i):
@@ -257,7 +272,18 @@ def run_match(job):
         "kills": subject.kills,
         "cubes": subject.s["cubes"],
         "drops": subject.drops,
-        "cause": subject.hit_by,
+        "cause": subject.fatal_weapon or ("win" if place == 1 else "clock"),
+        "killer": subject.fatal_source,
+        "killer_role": (
+            g.players[subject.fatal_source].role
+            if subject.fatal_source is not None and 0 <= subject.fatal_source < 16
+            else None
+        ),
+        "zone_phase": g.phase + 1,
+        "zone_radius": round(g.zone["radius"], 1),
+        "outside": not subject.s["in_zone"],
+        "ammo": subject.s["weapons"][0].get("ammo") if subject.s["weapons"][0] else None,
+        "sidearm": subject.s["weapons"][1]["kind"] if subject.s["weapons"][1] else None,
         "late": client.late,
         "bad": client.bad,
     }
@@ -307,16 +333,19 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm"),
-        default="holdout",
+        choices=("holdout", "confirm", "p4test"),
+        default="p4test",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
-    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=[*REFS, "candidate"])
+    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["phase3", "candidate"])
     ap.add_argument("--mix", type=int, choices=range(5), default=DEFAULT_MIX)
     ap.add_argument("--workers", type=int, help="default: 6 in Docker, 48 native")
     ap.add_argument(
         "--ffa", action="store_true", help="final-style independent opponents; separate cache"
+    )
+    ap.add_argument(
+        "--pool", choices=("practice", "strong", "both"), help="phase 4 defaults to both frozen fields"
     )
     runtime = ap.add_mutually_exclusive_group()
     runtime.add_argument(
@@ -334,6 +363,11 @@ def main():
     ap.add_argument("--ratio", type=float, default=None, help="use recorded median board/local ratio")
     ap.add_argument("--calibration", type=Path, default=ROOT.parent / "CALIBRATION.md")
     args = ap.parse_args()
+    if args.ffa and args.pool:
+        ap.error("--ffa selects the legacy independent field; use --pool strong for competitor copies")
+    pools = (
+        ["ffa"] if args.ffa else (["practice", "strong"] if args.pool in ("both", None) else [args.pool])
+    )
     if args.docker is None:
         args.docker = shutil.which("docker") is not None
     if args.workers is None:
@@ -364,57 +398,82 @@ def main():
             "FFA has no practice calibration" if args.ffa else "No calibration ledger or --ratio supplied"
         )
         print(f"{reason}. Scores below are raw placement points.", flush=True)
-    with ProcessPoolExecutor(
-        workers, mp_context=multiprocessing.get_context("fork"), initializer=pin_worker, initargs=(cpus,)
-    ) as pool:
-        for split in ("dev", args.test_split) if args.split == "all" else [args.split]:
-            first, default = SPLITS[split]
-            n = args.matches or default
-            jobs = {}
-            for name in args.models:
-                if HASHES[name] not in jobs:
-                    jobs[HASHES[name]] = [
-                        pool.submit(run_match, (first + i, name, args.mix, args.ffa, args.docker))
-                        for i in range(n)
+    for pool_name in pools:
+        (OUT / pool_name / str(args.mix)).mkdir(parents=True, exist_ok=True)
+        print("opponent pool", pool_name, flush=True)
+        pool_report = {}
+        with ProcessPoolExecutor(
+            workers,
+            mp_context=multiprocessing.get_context("fork"),
+            initializer=pin_worker,
+            initargs=(cpus,),
+        ) as pool:
+            for split in (
+                ("p4dev" if args.test_split == "p4test" else "dev", args.test_split)
+                if args.split == "all"
+                else [args.split]
+            ):
+                first, default = SPLITS[split]
+                n = args.matches or default
+                jobs = {}
+                for name in args.models:
+                    if HASHES[name] not in jobs:
+                        jobs[HASHES[name]] = [
+                            pool.submit(run_match, (first + i, name, args.mix, pool_name, args.docker))
+                            for i in range(n)
+                        ]
+                groups = {name: [f.result() for f in jobs[HASHES[name]]] for name in args.models}
+                out = {}
+                for name, rows in groups.items():
+                    values = [r["points"] for r in rows]
+                    score = interval(values)
+                    out[name] = {
+                        "n": n,
+                        "score_ci95": score,
+                        "total_points": sum(values),
+                        "placement_counts": {place: values.count(16 - place) for place in range(1, 17)},
+                        "late": sum(r["late"] for r in rows),
+                        "mean_cubes": statistics.mean(r["cubes"] for r in rows),
+                        "mean_kills": statistics.mean(r["kills"] for r in rows),
+                    }
+                    print(split, name, json.dumps(out[name]), flush=True)
+                reference = "phase3" if "phase3" in groups else "phase2"
+                if "candidate" in groups and reference in groups:
+                    delta = [
+                        a["points"] - b["points"] for a, b in zip(groups["candidate"], groups[reference])
                     ]
-            groups = {name: [f.result() for f in jobs[HASHES[name]]] for name in args.models}
-            out = {}
-            for name, rows in groups.items():
-                values = [r["points"] for r in rows]
-                score = interval(values)
-                out[name] = {
-                    "n": n,
-                    "score_ci95": score,
-                    "total_points": sum(values),
-                    "late": sum(r["late"] for r in rows),
-                    "mean_cubes": statistics.mean(r["cubes"] for r in rows),
-                    "mean_kills": statistics.mean(r["kills"] for r in rows),
-                }
-                print(split, name, json.dumps(out[name]), flush=True)
-            if "candidate" in groups and "phase2" in groups:
-                delta = [a["points"] - b["points"] for a, b in zip(groups["candidate"], groups["phase2"])]
-                out["paired_gain_ci95"] = interval(delta)
-                if split == "confirm" and n == 400:
-                    # Two-sided 97.5% Student critical value rounded upward for df=399.
-                    mean = statistics.mean(delta)
-                    half = 2.251 * statistics.stdev(delta) / math.sqrt(n)
-                    out["paired_gain_ci97_5"] = [mean, mean - half, mean + half]
-                    print(split, "paired 97.5% interval", out["paired_gain_ci97_5"], flush=True)
-                print(split, "paired candidate minus phase2", out["paired_gain_ci95"], flush=True)
-            if args.ratio is not None and "candidate" in out:
-                out["calibrated_prediction"] = args.ratio * out["candidate"]["score_ci95"][0]
-                out["calibrated_seed_ci95"] = [
-                    v * args.ratio if v is not None else None for v in out["candidate"]["score_ci95"][1:]
-                ]
-                print(
-                    split,
-                    "calibrated placement prediction",
-                    out["calibrated_prediction"],
-                    "seed CI",
-                    out["calibrated_seed_ci95"],
-                    flush=True,
-                )
-            report[split] = out
+                    out["paired_reference"] = reference
+                    out["paired_finishes"] = {
+                        "better": sum(d > 0 for d in delta),
+                        "same": delta.count(0),
+                        "worse": sum(d < 0 for d in delta),
+                    }
+                    out["paired_gain_ci95"] = interval(delta)
+                    if split == "confirm" and n == 400:
+                        # Two-sided 97.5% Student critical value rounded upward for df=399.
+                        mean = statistics.mean(delta)
+                        half = 2.251 * statistics.stdev(delta) / math.sqrt(n)
+                        out["paired_gain_ci97_5"] = [mean, mean - half, mean + half]
+                        print(split, "paired 97.5% interval", out["paired_gain_ci97_5"], flush=True)
+                    print(split, "paired candidate minus", reference, out["paired_gain_ci95"], flush=True)
+                if pool_name == "practice" and args.ratio is not None and "candidate" in out:
+                    out["calibrated_prediction"] = args.ratio * out["candidate"]["score_ci95"][0]
+                    out["calibrated_seed_ci95"] = [
+                        v * args.ratio if v is not None else None
+                        for v in out["candidate"]["score_ci95"][1:]
+                    ]
+                    print(
+                        split,
+                        "calibrated placement prediction",
+                        out["calibrated_prediction"],
+                        "seed CI",
+                        out["calibrated_seed_ci95"],
+                        flush=True,
+                    )
+                pool_report[split] = out
+        report[pool_name] = pool_report
+        if len(pools) == 1:
+            report.update(pool_report)  # Keep single-pool reports readable by older scripts.
     report.update(elapsed_s=round(time.monotonic() - start, 2), engine=ENGINE, mix=args.mix)
     report.update(
         runtime="docker" if args.docker else "native",

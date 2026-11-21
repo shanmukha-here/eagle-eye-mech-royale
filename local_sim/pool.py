@@ -5,7 +5,10 @@ from .game import angle, unit
 
 
 # Fixed 4/4/4/3 tier order. Only the calibration split may select the mix.
-def roster(mix):
+def roster(mix, strong=False):
+    if strong:
+        # Frozen historical policies. Each controller sees only its own observation.
+        return ["phase3"] * 6 + ["equipment"] * 4 + ["circle"] * 2 + ["phase2"] * 3
     easy = ["starter"] * (4 - mix) + ["hunter"] * mix
     return easy + [
         "looter",

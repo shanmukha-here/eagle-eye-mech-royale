@@ -66,6 +66,8 @@ class Player:
         self.crate_hits = 0
         self.drops = 0
         self.hit_by = "none"
+        self.fatal_source = None
+        self.fatal_weapon = None
         self.controller = None
 
     def actor(self):
@@ -420,6 +422,8 @@ class Match:
             s["hp"] -= amount
             p.last_combat = self.t
             p.hit_by = "zone"
+            if s["hp"] <= 0 and p.fatal_weapon is None:
+                p.fatal_weapon = "zone"
             p.events.append(
                 {"type": "damaged", "amount": amount, "weapon": "zone", "by": None, "bearing": None}
             )
@@ -440,6 +444,8 @@ class Match:
             s["hp"] -= dmg
             q.last_combat = self.t
             q.hit_by = kind
+            if s["hp"] <= 0 and q.fatal_weapon is None:
+                q.fatal_weapon, q.fatal_source = kind, src
             q.events.append(
                 {
                     "type": "damaged",

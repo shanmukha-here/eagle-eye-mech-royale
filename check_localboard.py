@@ -93,6 +93,21 @@ def run():
         def fresh():
             return Match(geo, hello, 123456, roster(3))
 
+        strong = roster(3, strong=True)
+        assert {role: strong.count(role) for role in set(strong)} == {
+            "phase3": 6,
+            "equipment": 4,
+            "circle": 2,
+            "phase2": 3,
+        }
+        arena = Match(geo, hello, 123456, strong, ffa=True)
+        victim, attacker = [arena.players[i] for i in arena.order[:2]]
+        victim.s["hp"] = 1
+        arena.hurt(attacker.id, victim.id, 100, "laser", attacker.s["pos"])
+        arena.hurt(attacker.id, victim.id, 100, "gun", attacker.s["pos"])
+        assert (victim.fatal_weapon, victim.fatal_source) == ("laser", attacker.id)
+        assert attacker.kills == 1
+        print("PASS independent strong roster and first lethal hit between two non-subjects")
         if args.replay:
             audit_replay(args.replay, fresh())
         from localboard import load_module
