@@ -50,8 +50,7 @@ class Bot:
         self.blocked_count = 0
         self.cover_key = self.cover_point = None
         self.cover_refresh = -1
-        self.repair_until = -1
-        self.kill_site = None
+        self.loading_until = -1
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -636,7 +635,7 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
-        if self.mode == "reset":
+        if self.mode == "magazine":
             weight = 0.12
         if self.mode == "cover" and not endpoint:
             weight = 0.45
@@ -735,7 +734,7 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
-        if self.mode == "reset" and not self.blocked_count:
+        if self.mode == "magazine" and not self.blocked_count:
             boosting = goal_dist > 7 and me["grounded"] and me["energy"] > 28
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
@@ -814,21 +813,20 @@ class Bot:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
             self.plan_at = t
             healing = False
-        if any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"]):
-            self.kill_site=tuple(p[:2])
-            self.cover_key=None
-            missing=max(0,0.90*me["max_hp"]-me["hp"])
-            self.repair_until=t+min(22,me["stats"]["regen_delay"]+missing/max(1,me["stats"]["regen_per_s"])+1.5)
-        resetting=t<self.repair_until and not urgent and hp_fraction<0.93
-        ring=None
-        if resetting:
-            ring=drop
-            if ring is None:
-                self.goal=self._duel_cover(obs,[m for m,_,_ in threats],"reset",
-                                           relocate=math.dist(self.kill_site,p[:2])<20)
-                self.mode="reset"
-            healing=False
+        gun=me["weapons"][0]
+        needs_load=gun["ammo"] <= max(3,round(gun["stats"]["mag"]*.30))
+        # A partially spent magazine is also worth refilling in the gap after an elimination.
+        just_killed=any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"])
+        if not urgent and ((needs_load and (live or t-self.last_contact<3)) or
+                (just_killed and gun["ammo"] < gun["stats"]["mag"]*.8)):
+            self.loading_until=max(self.loading_until,t+min(.7,gun["stats"]["reload"]))
+        loading=drop is None and not urgent and gun["ammo"]<gun["stats"]["mag"] and (
+            t<self.loading_until or (gun["reload"]>0 and t-self.last_contact<4))
+        if loading:
+            self.goal=self._duel_cover(obs,[m for m,_,_ in threats],"magazine")
+            self.mode="magazine"
             self.plan_at=t
+            healing=False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -848,10 +846,6 @@ class Bot:
                 move, boost, jump = (0, 0), False, False
             elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
                 boost = True
-        if resetting and math.dist(p[:2],self.goal) < (ring["radius"]*.7 if ring else 3):
-            move,boost,jump=(0,0),False,False
-        elif resetting and ring and me["grounded"] and me["energy"]>32 and not self.blocked_count:
-            boost=True
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
@@ -866,13 +860,11 @@ class Bot:
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
         self._weapons(obs, target, center, act, urgent)
-        if resetting:
-            gun=me["weapons"][0]
-            if not gun["reload"] and gun["ammo"]<gun["stats"]["mag"]:
+        if loading:
+            if gun["reload"]<=0:
                 act["reload"]=True
-            # Damage dealt also restarts regeneration. Defend if a close rival already has sight.
-            if not any(clear and distance<47 for _,distance,clear in threats):
-                act["fire"]=[False,False]
+            fire=act.get("fire",[False,False])
+            act["fire"]=[False,fire[1]]
         return act
 
 
