@@ -47,6 +47,7 @@ SPLITS = {
     "p5dev": (1500000, 96),
     "p5verify": (1600000, 200),
     "p5test": (1700000, 320),
+    "p5final": (1800000, 320),
 }
 DEFAULT_MIX = 3
 
@@ -338,7 +339,7 @@ def main():
     ap.add_argument(
         "--test-split",
         choices=("holdout", "confirm", "p4test", "p5test"),
-        default="p5test",
+        default="p5final",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
@@ -413,7 +414,7 @@ def main():
             initargs=(cpus,),
         ) as pool:
             for split in (
-                ({"p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
+                ({"p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
                 if args.split == "all"
                 else [args.split]
             ):
