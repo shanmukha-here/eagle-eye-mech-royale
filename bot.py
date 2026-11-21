@@ -86,6 +86,39 @@ class Bot:
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
 
+    def _repair_drop(self, obs, threats, urgent):
+        me, zone = obs["self"], obs["zone"]
+        if urgent or not me["in_zone"]:
+            return None
+        health = me["hp"]/me["max_hp"]
+        if health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
+            return None
+        speed = max(1, me["stats"]["walk_speed"])
+        best = None
+        for drop in obs["drops"]:
+            if drop["holder"] not in (None, me["id"]):
+                continue
+            point = drop["pos"][:2]
+            cell = self.arena.cell(*point)
+            if cell is None or abs(drop["pos"][2]-self.arena.floor[cell]) > 5:
+                continue
+            distance = math.dist(me["pos"][:2],point)
+            eta = max(0,distance-drop["radius"]*.5)*1.25 / speed
+            finish = max(eta,drop["lands_in"])+drop["capture_s"]-drop["progress"]
+            if finish > (24 if health < 0.7 else 16):
+                continue
+            inside_next = math.dist(zone["next_center"],point) < zone["next_radius"]-drop["radius"]
+            if not inside_next and zone["shrink_end"]-obs["t"] < finish+12:
+                continue
+            if math.dist(zone["center"],point) > zone["radius"]-drop["radius"]:
+                continue
+            if any(math.dist(m["pos"][:2],point)/speed < finish+1.2 for m,_,_ in threats):
+                continue
+            score = finish + .01*distance
+            if best is None or score < best[0]:
+                best = score, drop
+        return best[1] if best else None
+
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
         pos = me["pos"]
@@ -211,17 +244,6 @@ class Bot:
                     score = 86 + min(95, novelty) * 0.23 - distance * 0.06
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
-        # Before the first contact, an unopened ground crate offers a weapon roll and a cube.
-        if (not urgent and not threats and obs["t"]-self.last_contact > 3
-                and obs["t"] < 105 and me["hp"] >= 0.75*me["max_hp"]
-                and (not me["weapons"][1] or me["cubes"] < 4)):
-            for obj in obs["crates"]:
-                q = obj["pos"]
-                cell = self.arena.cell(*q[:2])
-                if cell is None or abs(q[2]-self.arena.floor[cell]) > 4 or math.dist(pos,q)>165:
-                    continue
-                damage_left = obj["hp"]/max(1,me["weapons"][0]["stats"]["damage"])
-                add(*q[:2], "harvest", 149-2*damage_left, detour=True)
         if not urgent and me["cubes"] < 12:
             for point, kind, seen in self.loot.values():
                 if kind == "cube" and math.dist(pos,point) < 33 and abs(point[2]-pos[2]) < 5:
@@ -394,15 +416,6 @@ class Bot:
                     return drone, self._actor_center(drone)
         if urgent or me["hp"] < me["max_hp"]*0.68 or obs["t"] - self.last_contact < 3:
             return None, 0
-        if self.mode == "harvest":
-            for obj in obs["crates"]:
-                q = obj["pos"]
-                if math.dist(self.goal,q[:2]) > 6:
-                    continue
-                h = self.cfg["crates"]["height"]*0.5
-                if self.arena.line_open((*me["pos"][:2],me["pos"][2]+me["stats"]["muzzle_height"]),
-                                        (*q[:2],q[2]+h)):
-                    return obj,h
         if npcs:
             return npcs[0], self._actor_center(npcs[0])
         for item in sorted(obs["crates"], key=lambda c: math.dist(c["pos"], me["pos"])):
@@ -746,6 +759,11 @@ class Bot:
             self._choose_goal(obs, threats, pressured, urgent)
             self.plan_state = state
             self.plan_at = t + (0.8 if pressured or urgent else 1.4)
+        drop = self._repair_drop(obs, threats, urgent)
+        if drop is not None:
+            self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
+            self.plan_at = t
+            healing = False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -759,6 +777,12 @@ class Bot:
             move, boost, jump = (0, 0), False, False
         else:
             move, boost, jump = self._move(obs, threats, urgent, pressured)
+        if drop is not None:
+            distance = math.dist(p[:2], drop["pos"][:2])
+            if distance < drop["radius"]*0.75:
+                move, boost, jump = (0, 0), False, False
+            elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
+                boost = True
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
