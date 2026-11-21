@@ -48,8 +48,6 @@ class Bot:
         self.unstick_until = -1
         self.rescue_until = -1
         self.blocked_count = 0
-        self.reserve_until=-1
-        self.saved_shot=False
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -798,35 +796,14 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
+        # Use an uncontested capture to prepare for contact while the ring is restoring us.
+        if (drop is not None and math.dist(p[:2],drop["pos"][:2]) < drop["radius"]*.75
+                and not live and drop["holder"] in (None,me["id"])):
+            gun=me["weapons"][0]
+            if gun["ammo"] < gun["stats"]["mag"] and gun["reload"]<=0:
+                act["reload"]=True
+            target=None
         self._weapons(obs, target, center, act, urgent)
-        gun,side=me["weapons"]
-        if side and side["kind"]=="laser" and not urgent:
-            foe=target and target.get("kind")=="mech"
-            gun_power=gun["stats"]["damage"]*(1+self.cfg["cubes"]["damage_per_cube"]*min(me["cubes"],self.cfg["cubes"]["stat_cap"]))
-            cheap=foe and gun["ammo"]>=2 and not gun["reload"] and target["hp"]<1.65*gun_power
-            kill=any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"])
-            if kill:
-                self.reserve_until=t+2.0
-                self.saved_shot=False
-            fire=act.get("fire",[False,False])
-            if cheap and side["charge"]==0:
-                act["fire"]=[fire[0],False]
-            elif t<self.reserve_until and not self.saved_shot and side["cooldown"]<=0.1:
-                if not foe:
-                    if side["charge"]<side["stats"]["charge"]+0.55:
-                        act["fire"]=[False,True]
-                    else:
-                        self.saved_shot=True
-                elif side["charge"]>0:
-                    q=target["pos"]
-                    yaw=math.atan2(q[1]-p[1],q[0]-p[0])
-                    aligned=abs(angle_delta(yaw,me["aim"][0]))<.085
-                    if aligned and side["charge"]>=side["stats"]["charge"]*.8:
-                        self.saved_shot=True
-                        act["aim"]=[yaw,math.atan2(q[2]+center-p[2]-me["stats"]["muzzle_height"],math.dist(q[:2],p[:2]))]
-                        act["fire"]=[fire[0],False]
-                    else:
-                        act["fire"]=[fire[0],True]
         return act
 
 
