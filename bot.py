@@ -373,7 +373,11 @@ class Bot:
                 m, d = pair
                 hp = m.get("hp", self.cfg["mech"]["hp"])
                 commitment = 43 if m["id"]==self.encounter and obs["t"]<self.encounter_until else 0
-                return (d*0.28 + hp*0.07 - commitment)
+                # An elimination immediately removes an incoming line of fire.
+                damage = me["weapons"][0]["stats"]["damage"]
+                shots = math.ceil(hp / max(1, damage))
+                finish_bonus = 75 if shots <= 3 and d < 155 else 0
+                return d * 0.24 + min(hp, 1600) * 0.11 - commitment - finish_bonus
             m, _ = min(live, key=priority)
             return m, self._actor_center(m)
         if not urgent:
@@ -541,13 +545,6 @@ class Bot:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
             if len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
-            if faced and not urgent and 30 < d < 170 and self.damage_window:
-                # Carry lateral velocity through an incoming burst.
-                vx, vy = me["vel"][:2]
-                lateral = -ry * vx + rx * vy
-                if abs(lateral) > 2:
-                    side = 1 if lateral > 0 else -1
-                retreat = max(0.2, min(0.85, retreat))
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
