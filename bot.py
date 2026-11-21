@@ -1,6 +1,7 @@
 """Eagle Eye entry for the mechfight/1 JSON-lines game protocol."""
 import json
 import math
+import random
 import os
 import select
 
@@ -22,7 +23,8 @@ class Bot:
         self.arena = Arena(hello["map"]["dir"], self.cfg["mech"])
         self.nav = Navigator(self.arena)
         self.seed_angle = math.tau * ((hello["seed"] % 10007) / 10007)
-        self.drones = {}
+        self.rng = random.Random(hello["seed"])
+        self.jink_side, self.jink_until = 1, -1.0
         self.previous_target = None
         self.charge_since = {}
         self.searched = set()
@@ -65,12 +67,8 @@ class Bot:
                 item_id = item["id"]
                 visible.add(item_id)
                 self.loot[item_id] = (item["pos"], item.get("kind", value), t)
-        for m in obs["mechs"]:
-            if m["kind"] == "npc":
-                self.drones[m["id"]] = (m["pos"], t)
-        self.drones = {k: v for k, v in self.drones.items() if t - v[1] < 30}
         for item_id, (point, _, seen) in list(self.loot.items()):
-            if t-seen > (48 if _ in ("laser","lightning") else 60 if _ == "crate" else 14) or (item_id not in visible and math.dist(point, pos) < 7):
+            if t-seen > (48 if _ in ("laser","lightning") else 14) or (item_id not in visible and math.dist(point, pos) < 7):
                 del self.loot[item_id]
 
     def _visible_contacts(self, obs):
@@ -220,23 +218,9 @@ class Bot:
                     score = 86 + min(95, novelty) * 0.23 - distance * 0.06
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
-        self.farming = (not urgent and not threats and obs["t"] - self.last_contact > 4
-                        and obs["t"] < 140 and me["hp"] >= 0.7*me["max_hp"] and me["cubes"] < 10)
-        if self.farming:
-            # Before the first fight, nearby crates and drones are the cheapest cubes,
-            # and each early cube raises HP and damage for every later exchange.
-            for point, kind, seen in self.loot.values():
-                if kind == "crate" and abs(point[2]-pos[2]) < 6 and math.dist(pos, point) < 260:
-                    add(*point[:2], "harvest", 150, detour=True)
-                if kind == "cube" and abs(point[2]-pos[2]) < 6 and math.dist(pos, point) < 90:
-                    add(*point[:2], "cube", 240, detour=True)
-            for point, seen in self.drones.values():
-                if math.dist(pos[:2], point[:2]) < 260:
-                    ux, uy = direction(x-point[0], y-point[1])
-                    add(point[0]+ux*55, point[1]+uy*55, "drone", 140, detour=True)
         if not urgent and me["cubes"] < 12:
             for point, kind, seen in self.loot.values():
-                if kind == "cube" and math.dist(pos,point) < (70 if threats and me["hp"] > 0.4*me["max_hp"] else 33 if threats else 160) and abs(point[2]-pos[2]) < 5:
+                if kind == "cube" and math.dist(pos,point) < (33 if threats and me["hp"] > 0.4*me["max_hp"] else 33 if threats else 160) and abs(point[2]-pos[2]) < 5:
                     add(*point[:2],kind,240,detour=True)
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
@@ -408,17 +392,10 @@ class Bot:
             return None, 0
         if npcs:
             return npcs[0], self._actor_center(npcs[0])
-        if getattr(self, "farming", False):
-            p = me["pos"]
-            muzzle = (p[0], p[1], p[2]+me["stats"]["muzzle_height"])
-            for m in sorted((m for m in obs["mechs"] if m["kind"] == "npc"), key=lambda m: math.dist(m["pos"], p)):
-                if math.dist(m["pos"], p) < 130 and self.arena.line_open(
-                        muzzle, (*m["pos"][:2], m["pos"][2]+self._actor_center(m))):
-                    return m, self._actor_center(m)
         for item in sorted(obs["crates"], key=lambda c: math.dist(c["pos"], me["pos"])):
             p, q = me["pos"], item["pos"]
             h = self.cfg["crates"]["height"]*0.5
-            if math.dist(p, q) < (120 if getattr(self, 'farming', False) else 64) and self.arena.line_open(
+            if math.dist(p, q) < 64 and self.arena.line_open(
                     (p[0], p[1], p[2]+me["stats"]["muzzle_height"]), (q[0], q[1], q[2]+h)):
                 return item, h
         return None, 0
@@ -570,6 +547,12 @@ class Bot:
             faced = abs(angle_delta(inbound, m["aim"][0])) < 0.55
             if faced and not urgent and d < 215:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
+            if d > 0 and not urgent:
+                # Irregular lateral reversals defeat linear-lead fire during long bullet flights.
+                if t >= self.jink_until:
+                    self.jink_side = -self.jink_side
+                    self.jink_until = t + self.rng.uniform(0.3, 0.7)
+                side = self.jink_side
             if len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
@@ -817,7 +800,7 @@ class Bot:
         else:
             sounds = [s for s in obs["sounds"] if s["kind"] in ("gun", "laser", "lightning", "mortar", "laser_charge")]
             yaw = sounds[-1]["bearing"] if sounds else self.seed_angle + t*0.95
-        if target is None and ((me["weapons"][1] is None and t < 70) or getattr(self, "farming", False)) and t - self.last_contact > 1:
+        if target is None and me["weapons"][1] is None and t < 70 and t - self.last_contact > 1:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
