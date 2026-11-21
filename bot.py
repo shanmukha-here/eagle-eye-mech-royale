@@ -188,6 +188,12 @@ class Bot:
                 if math.dist(point[:2], zone["center"]) > zone["radius"] - 6:
                     continue
                 score = 245 - distance * 0.22 - min(35, (obs["t"] - seen) * 0.4)
+                # Compare our arrival with the nearest visible competitor.
+                for rival, _, clear in threats[:3]:
+                    if clear:
+                        lead = distance - math.dist(rival["pos"], point)
+                        if lead > -12:
+                            score -= min(130, (lead + 12) * 2.5)
                 goals.append((score, *point[:2], "laser"))
         if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
@@ -373,11 +379,7 @@ class Bot:
                 m, d = pair
                 hp = m.get("hp", self.cfg["mech"]["hp"])
                 commitment = 43 if m["id"]==self.encounter and obs["t"]<self.encounter_until else 0
-                # An elimination immediately removes an incoming line of fire.
-                damage = me["weapons"][0]["stats"]["damage"]
-                shots = math.ceil(hp / max(1, damage))
-                finish_bonus = 75 if shots <= 3 and d < 155 else 0
-                return d * 0.24 + min(hp, 1600) * 0.11 - commitment - finish_bonus
+                return (d*0.28 + hp*0.07 - commitment)
             m, _ = min(live, key=priority)
             return m, self._actor_center(m)
         if not urgent:
