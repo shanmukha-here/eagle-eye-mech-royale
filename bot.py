@@ -622,6 +622,11 @@ class Bot:
             weight = 0.12
         if self.mode == "standoff":
             weight = 0.23
+        if self.mode == "counter" and live:
+            rx, ry = direction(p[0]-live[0][0]["pos"][0], p[1]-live[0][0]["pos"][1])
+            sign = 1 if me["vel"][1]*rx - me["vel"][0]*ry >= 0 else -1
+            evade = -ry*sign, rx*sign
+            weight = 2.0
         if self.mode == "screen":
             weight = 0.12
             if goal_dist < 2:
@@ -823,6 +828,23 @@ class Bot:
                     self.goal = p[0]+8*dx, p[1]+8*dy
                     self.mode = "screen"
                     self.plan_at = t + 0.7
+        # A lone pursuer can keep a damaged mech from ever starting regeneration.
+        # Hold the angle and finish the encounter if the weapon cycle favors us.
+        if len(threats) == 1 and threats[0][2] and not urgent:
+            enemy, dist, _ = threats[0]
+            gun, side = me["weapons"]
+            ready = gun["ammo"] * gun["stats"]["damage"]
+            if side and side["kind"] == "laser" and side["cooldown"] < 0.8:
+                ready += side["stats"]["damage"]
+            elif side and side["kind"] == "lightning" and dist < side["stats"]["range"]:
+                ready += 4 * side["stats"]["damage"]
+            if (self.mode in ("cover", "heal", "cube", "laser", "skirt", "screen")
+                    and ready > 0.52 * enemy["hp"] and me["hp"] > 0.43 * enemy["hp"]):
+                self.mode = "counter"
+                self.goal = tuple(p[:2])
+                self.plan_at = t
+                healing = False
+                tactical = False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
