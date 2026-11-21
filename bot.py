@@ -351,6 +351,8 @@ class Bot:
             priorities = {"plating": 10, "armor": 9.5, "gun_damage": 9, "nanites": 8.5,
                           "gun_rate": 8, "gun_mag": 7.5, "servos": 7, "lightning_range": 7,
                           "laser_damage": 7, "gun_velocity": 6, "jets": 5, "sensors": 5}
+            priorities.update(gun_mag=11, gun_damage=10.5, gun_rate=9.8, laser_damage=10.4,
+                              lightning_range=10.3, gun_velocity=8.6)
             choices = obs["offer"]["choices"]
             if choices:
                 act["pick"] = max(range(len(choices)), key=lambda i: priorities.get(choices[i]["id"], 3))
@@ -382,12 +384,6 @@ class Bot:
                 return (d*0.28 + hp*0.07 - commitment)
             m, _ = min(live, key=priority)
             return m, self._actor_center(m)
-        if not urgent and me["weapons"][1] is None:
-            for item in sorted(obs["crates"],key=lambda a:math.dist(a["pos"],me["pos"])):
-                q=item["pos"]
-                h=self.cfg["crates"]["height"]*.5
-                if math.dist(q,me["pos"])<125 and self.arena.line_open((*me["pos"][:2],me["pos"][2]+me["stats"]["muzzle_height"]),(*q[:2],q[2]+h)):
-                    return item,h
         if not urgent:
             for drone in npcs:
                 if drone["id"] == self.last_drone[0] and obs["t"]-self.last_drone[1] < 2:
