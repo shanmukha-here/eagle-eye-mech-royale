@@ -48,6 +48,10 @@ class Bot:
         self.unstick_until = -1
         self.rescue_until = -1
         self.blocked_count = 0
+        self.escape_contact = None
+        self.escape_seen = -100
+        self.next_exit = -1
+        self.exit_point = None
         self.crossfire_goal = None
         self.crossfire_key = ()
         self.crossfire_refresh = -1
@@ -638,6 +642,8 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
+        if self.mode == "exit":
+            weight = 0.16
         if self.mode == "crossfire":
             weight = 0.20
         if self.mode == "cover" and not endpoint:
@@ -737,6 +743,8 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
+        if self.mode == "exit" and not self.blocked_count:
+            boosting = me["grounded"] and me["energy"] > 18
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
@@ -809,6 +817,39 @@ class Bot:
             self._choose_goal(obs, threats, pressured, urgent)
             self.plan_state = state
             self.plan_at = t + (0.8 if pressured or urgent else 1.4)
+        if len(threats) > 1:
+            self.escape_contact = None
+            self.exit_point = None
+        elif threats:
+            self.escape_contact = threats[0][0]
+            self.escape_seen = t
+        rival = self.escape_contact
+        if (self.mech_kills > 0 and rival and t - self.escape_seen < 12 and not urgent and me["hp"] < 0.84*me["max_hp"]
+                and self.mode in ("cover", "heal", "exit") and not (live and rival["hp"] < me["hp"]*0.6)):
+            if t >= self.next_exit or self.exit_point is None or math.dist(self.exit_point, p[:2]) < 8:
+                self.next_exit = t + 1.4
+                away = math.atan2(p[1]-rival["pos"][1], p[0]-rival["pos"][0])
+                eye = (*rival["pos"][:2], rival["pos"][2]+self._actor_center(rival)*1.55)
+                best_exit = None
+                for turn in (0, -0.6, 0.6, -1.15, 1.15, -1.57, 1.57):
+                    for length in (22, 45, 72):
+                        xy = p[0]+length*math.cos(away+turn), p[1]+length*math.sin(away+turn)
+                        c = self.arena.cell(*xy)
+                        if c is None or self.arena.clearance[c] < me["stats"]["radius"]+2:
+                            continue
+                        if math.dist(xy,zone["center"]) > zone["radius"]-8:
+                            continue
+                        covered = not self.arena.line_open(eye, (*xy,self.arena.floor[c]+me["stats"]["muzzle_height"]))
+                        gap = math.dist(xy, rival["pos"][:2]) - math.dist(p[:2],rival["pos"][:2])
+                        cost = 0.3*length - 0.7*gap - 40*covered
+                        cost += 0.6*max(0, math.dist(xy,zone["next_center"])-zone["next_radius"])
+                        if best_exit is None or cost < best_exit[0]:
+                            best_exit = cost,xy
+                self.exit_point = best_exit[1] if best_exit else None
+            if self.exit_point:
+                self.goal, self.mode = self.exit_point, "exit"
+                healing = False
+                self.plan_at = t
         drop = self._repair_drop(obs, threats, urgent)
         if drop is not None:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
