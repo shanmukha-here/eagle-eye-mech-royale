@@ -52,8 +52,6 @@ class Bot:
         self.escape_seen = -100
         self.next_exit = -1
         self.exit_point = None
-        self.observed_duel = frozenset()
-        self.observed_duel_until = -1
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -91,39 +89,6 @@ class Bot:
             return self.cfg["npc"]["height"] * 0.5
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
-
-    def _repair_drop(self, obs, threats, urgent):
-        me, zone = obs["self"], obs["zone"]
-        if urgent or not me["in_zone"]:
-            return None
-        health = me["hp"]/me["max_hp"]
-        if health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
-            return None
-        speed = max(1, me["stats"]["walk_speed"])
-        best = None
-        for drop in obs["drops"]:
-            if drop["holder"] not in (None, me["id"]):
-                continue
-            point = drop["pos"][:2]
-            cell = self.arena.cell(*point)
-            if cell is None or abs(drop["pos"][2]-self.arena.floor[cell]) > 5:
-                continue
-            distance = math.dist(me["pos"][:2],point)
-            eta = max(0,distance-drop["radius"]*.5)*1.25 / speed
-            finish = max(eta,drop["lands_in"])+drop["capture_s"]-drop["progress"]
-            if finish > (24 if health < 0.7 else 16):
-                continue
-            inside_next = math.dist(zone["next_center"],point) < zone["next_radius"]-drop["radius"]
-            if not inside_next and zone["shrink_end"]-obs["t"] < finish+12:
-                continue
-            if math.dist(zone["center"],point) > zone["radius"]-drop["radius"]:
-                continue
-            if any(math.dist(m["pos"][:2],point)/speed < finish+1.2 for m,_,_ in threats):
-                continue
-            score = finish + .01*distance
-            if best is None or score < best[0]:
-                best = score, drop
-        return best[1] if best else None
 
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
@@ -378,35 +343,6 @@ class Bot:
                     return True
         pair, expires = self.other_fight
         return t < expires and pair <= ids
-
-    def _nearby_duel(self, obs, threats):
-        me = obs["self"]
-        nearby = {m["id"]: (m, distance) for m, distance, clear in threats
-                  if clear and distance < 160}
-        if len(nearby) < 2 or obs["alive"] <= 3 or self.damage_window:
-            return ()
-        t = obs["t"]
-        for beam in obs["beams"]:
-            if beam["by"] not in nearby or len(beam["path"]) < 2:
-                continue
-            for endpoint in beam["path"][1:]:
-                if math.dist(endpoint[:2], me["pos"][:2]) < 8:
-                    break
-                for rival, _ in nearby.values():
-                    if rival["id"] == beam["by"]:
-                        continue
-                    x, y, z = rival["pos"]
-                    if (math.hypot(x-endpoint[0],y-endpoint[1]) < 5 and
-                            z-1 <= endpoint[2] <= z+2*self._actor_center(rival)+1):
-                        self.observed_duel = frozenset((rival["id"], beam["by"]))
-                        self.observed_duel_until = t + 1.6
-        pair = self.observed_duel
-        if t < self.observed_duel_until and pair <= nearby.keys():
-            # A nearby unrelated rival remains urgent even when two others are occupied.
-            if any(i not in pair and d < 85 for i, (_, d) in nearby.items()):
-                return ()
-            return tuple(nearby[i] for i in sorted(pair))
-        return ()
 
     def _loadout(self, obs, act):
         me = obs["self"]
@@ -831,11 +767,22 @@ class Bot:
                 self.goal, self.mode = self.exit_point, "exit"
                 healing = False
                 self.plan_at = t
-        drop = self._repair_drop(obs, threats, urgent)
-        if drop is not None:
-            self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
-            self.plan_at = t
-            healing = False
+        # On an escape route, collect a cube already lying close to that route.
+        if self.mode == "exit" and not live and not urgent and self.exit_point is not None:
+            direct = math.dist(p[:2], self.exit_point)
+            best_cube = None
+            for cube in obs["cubes"]:
+                point = cube["pos"]
+                nearby = math.dist(p[:2], point[:2])
+                if not (4 < nearby < min(20, direct)) or abs(point[2]-p[2]) >= 4:
+                    continue
+                detour = nearby + math.dist(point[:2], self.exit_point) - direct
+                cell = self.arena.cell(*point[:2])
+                if (detour < 5 and cell is not None and self.arena.clearance[cell] > me["stats"]["radius"] + 2
+                        and (best_cube is None or nearby < best_cube[0])):
+                    best_cube = nearby, tuple(point[:2])
+            if best_cube:
+                self.goal = best_cube[1]
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -849,12 +796,6 @@ class Bot:
             move, boost, jump = (0, 0), False, False
         else:
             move, boost, jump = self._move(obs, threats, urgent, pressured)
-        if drop is not None:
-            distance = math.dist(p[:2], drop["pos"][:2])
-            if distance < drop["radius"]*0.75:
-                move, boost, jump = (0, 0), False, False
-            elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
-                boost = True
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
@@ -868,23 +809,6 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
-        duel = self._nearby_duel(obs, threats) if not urgent else ()
-        if duel and self.mode not in ("drop", "heal"):
-            gun, side = me["weapons"]
-            weakest, distance = min(duel, key=lambda contact:contact[0]["hp"])
-            can_finish = (health := me["hp"]/me["max_hp"]) >= 0.66 and (
-                distance < 94 and gun["ammo"] >= 3 and gun["reload"] <= 0
-                and weakest["hp"] < 2.8*gun["stats"]["damage"])
-            if (side and side["kind"] == "laser" and side["cooldown"] <= 0.1
-                    and health >= 0.75 and distance < 110
-                    and weakest["hp"] < side["stats"]["damage"]*0.75):
-                can_finish = True
-            if can_finish:
-                target, center = weakest, self._actor_center(weakest)
-            elif all(distance > 42 and abs(angle_delta(
-                    math.atan2(p[1]-enemy["pos"][1],p[0]-enemy["pos"][0]),enemy["aim"][0])) > 0.6
-                    for enemy, distance in duel):
-                target, center = None, 0
         self._weapons(obs, target, center, act, urgent)
         return act
 
