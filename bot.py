@@ -50,8 +50,8 @@ class Bot:
         self.blocked_count = 0
         self.cover_key = self.cover_point = None
         self.cover_refresh = -1
-        self.staged_id = None
-        self.staging_until = -1
+        self.repair_until = -1
+        self.kill_site = None
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -636,7 +636,7 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
-        if self.mode == "prepare":
+        if self.mode == "reset":
             weight = 0.12
         if self.mode == "cover" and not endpoint:
             weight = 0.45
@@ -735,7 +735,7 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
-        if self.mode == "prepare" and not self.blocked_count:
+        if self.mode == "reset" and not self.blocked_count:
             boosting = goal_dist > 7 and me["grounded"] and me["energy"] > 28
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
@@ -814,28 +814,21 @@ class Bot:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
             self.plan_at = t
             healing = False
-        # Delay only one finishing volley per rival, with an explicit release deadline.
-        gun = me["weapons"][0]
-        side = me["weapons"][1]
-        weak = min(live, key=lambda m:m["hp"], default=None)
-        if weak and weak["hp"] <= 3*gun["stats"]["damage"]*(1+0.04*min(me["cubes"],10)):
-            if weak["id"] != self.staged_id:
-                self.staged_id = weak["id"]
-                self.staging_until = t + min(3.5,gun["stats"]["reload"]+0.8)
-        preparing = False
-        if (weak and weak["id"] == self.staged_id and t < self.staging_until
-                and drop is None and not urgent and hp_fraction > 0.36):
-            others = [m for m,_,_ in threats if m["id"]!=weak["id"]]
-            site = self._duel_cover(obs, others, "prepare",finish=weak)
-            needs_ammo = gun["ammo"] < gun["stats"]["mag"] or gun["reload"]>0
-            nearby = math.dist(p[:2],site)<5
-            if (not nearby or needs_ammo) and burst < 0.21:
-                self.goal,self.mode=site,"prepare"
-                self.plan_at=t
-                healing=False
-                preparing=True
-            else:
-                self.staging_until=t
+        if any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"]):
+            self.kill_site=tuple(p[:2])
+            self.cover_key=None
+            missing=max(0,0.90*me["max_hp"]-me["hp"])
+            self.repair_until=t+min(22,me["stats"]["regen_delay"]+missing/max(1,me["stats"]["regen_per_s"])+1.5)
+        resetting=t<self.repair_until and not urgent and hp_fraction<0.93
+        ring=None
+        if resetting:
+            ring=drop
+            if ring is None:
+                self.goal=self._duel_cover(obs,[m for m,_,_ in threats],"reset",
+                                           relocate=math.dist(self.kill_site,p[:2])<20)
+                self.mode="reset"
+            healing=False
+            self.plan_at=t
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -855,6 +848,10 @@ class Bot:
                 move, boost, jump = (0, 0), False, False
             elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
                 boost = True
+        if resetting and math.dist(p[:2],self.goal) < (ring["radius"]*.7 if ring else 3):
+            move,boost,jump=(0,0),False,False
+        elif resetting and ring and me["grounded"] and me["energy"]>32 and not self.blocked_count:
+            boost=True
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
@@ -869,10 +866,13 @@ class Bot:
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
         self._weapons(obs, target, center, act, urgent)
-        if preparing:
-            act["reload"] = gun["ammo"] < gun["stats"]["mag"] and gun["reload"] <= 0
-            # A charged laser releases on false; hold it during the brief reposition.
-            act["fire"] = [False,bool(side and side["kind"]=="laser" and side.get("charge",0)>0)]
+        if resetting:
+            gun=me["weapons"][0]
+            if not gun["reload"] and gun["ammo"]<gun["stats"]["mag"]:
+                act["reload"]=True
+            # Damage dealt also restarts regeneration. Defend if a close rival already has sight.
+            if not any(clear and distance<47 for _,distance,clear in threats):
+                act["fire"]=[False,False]
         return act
 
 
