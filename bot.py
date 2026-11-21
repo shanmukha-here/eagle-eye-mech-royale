@@ -48,10 +48,9 @@ class Bot:
         self.unstick_until = -1
         self.rescue_until = -1
         self.blocked_count = 0
-        self.escape_contact = None
-        self.escape_seen = -100
-        self.next_exit = -1
-        self.exit_point = None
+        self.observed_duel = frozenset()
+        self.observed_duel_until = -1
+        self.duel_samples = {}
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -107,14 +106,7 @@ class Bot:
             if cell is None or abs(drop["pos"][2]-self.arena.floor[cell]) > 5:
                 continue
             distance = math.dist(me["pos"][:2],point)
-            ground = max(0,distance-drop["radius"]*.5)*1.25
-            eta = ground / speed
-            if health < 0.7 and me["grounded"] and me["energy"] > 48 and distance < 115:
-                # Count a brief initial boost, leaving enough energy to escape a bad ring.
-                sprint_time = min(2.2, (me["energy"]-36)/me["stats"]["boost_drain"])
-                boost_gain = max(0, me["stats"]["boost_speed"]-speed)*sprint_time
-                eta = max(0, ground-boost_gain)/speed
-
+            eta = max(0,distance-drop["radius"]*.5)*1.25 / speed
             finish = max(eta,drop["lands_in"])+drop["capture_s"]-drop["progress"]
             if finish > (24 if health < 0.7 else 16):
                 continue
@@ -384,6 +376,63 @@ class Bot:
         pair, expires = self.other_fight
         return t < expires and pair <= ids
 
+    def _nearby_duel(self, obs, threats):
+        me = obs["self"]
+        nearby = {m["id"]: (m, distance) for m, distance, clear in threats
+                  if clear and distance < 160}
+        previous = self.duel_samples
+        self.duel_samples = {rival_id: (m["hp"], obs["t"]) for rival_id,(m,_) in nearby.items()}
+        if len(nearby) < 2 or obs["alive"] <= 3 or self.damage_window:
+            return ()
+        t = obs["t"]
+        for beam in obs["beams"]:
+            if beam["by"] not in nearby or len(beam["path"]) < 2:
+                continue
+            for endpoint in beam["path"][1:]:
+                if math.dist(endpoint[:2], me["pos"][:2]) < 8:
+                    break
+                for rival, _ in nearby.values():
+                    if rival["id"] == beam["by"]:
+                        continue
+                    x, y, z = rival["pos"]
+                    if (math.hypot(x-endpoint[0],y-endpoint[1]) < 5 and
+                            z-1 <= endpoint[2] <= z+2*self._actor_center(rival)+1):
+                        self.observed_duel = frozenset((rival["id"], beam["by"]))
+                        self.observed_duel_until = t + 1.6
+        if t >= self.observed_duel_until:
+            # A fall in HP inside the zone plus another mech holding that angle
+            # catches gun duels which do not emit beams.
+            our_hits = {e.get("target") for e in obs["events"] if e["type"] == "hit"}
+            zone = obs["zone"]
+            for victim_id, (victim, _) in nearby.items():
+                old = previous.get(victim_id)
+                if (old is None or t-old[1] > 0.25 or old[0]-victim["hp"] < 30 or victim_id in our_hits
+                        or math.dist(victim["pos"][:2],zone["center"]) > zone["radius"]-7):
+                    continue
+                x,y,z = victim["pos"]
+                for other_id, (rival, _) in nearby.items():
+                    if other_id == victim_id:
+                        continue
+                    sx,sy,sz = rival["pos"]
+                    angle = math.atan2(y-sy, x-sx)
+                    if abs(angle_delta(angle, rival["aim"][0])) > 0.27:
+                        continue
+                    toward_me = math.atan2(me["pos"][1]-sy, me["pos"][0]-sx)
+                    if abs(angle_delta(toward_me,rival["aim"][0])) < 0.60:
+                        continue
+                    if self.arena.line_open((sx,sy,sz+self._actor_center(rival)*1.45),
+                                            (x,y,z+self._actor_center(victim))):
+                        self.observed_duel = frozenset((victim_id, other_id))
+                        self.observed_duel_until = t + 1.0
+                        break
+        pair = self.observed_duel
+        if t < self.observed_duel_until and pair <= nearby.keys():
+            # A nearby unrelated rival remains urgent even when two others are occupied.
+            if any(i not in pair and d < 85 for i, (_, d) in nearby.items()):
+                return ()
+            return tuple(nearby[i] for i in sorted(pair))
+        return ()
+
     def _loadout(self, obs, act):
         me = obs["self"]
         if obs["offer"]:
@@ -601,8 +650,6 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
-        if self.mode == "exit":
-            weight = 0.16
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
@@ -700,8 +747,6 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
-        if self.mode == "exit" and not self.blocked_count:
-            boosting = me["grounded"] and me["energy"] > 18
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
@@ -774,39 +819,6 @@ class Bot:
             self._choose_goal(obs, threats, pressured, urgent)
             self.plan_state = state
             self.plan_at = t + (0.8 if pressured or urgent else 1.4)
-        if len(threats) > 1:
-            self.escape_contact = None
-            self.exit_point = None
-        elif threats:
-            self.escape_contact = threats[0][0]
-            self.escape_seen = t
-        rival = self.escape_contact
-        if (self.mech_kills > 0 and rival and t - self.escape_seen < 12 and not urgent and me["hp"] < 0.84*me["max_hp"]
-                and self.mode in ("cover", "heal", "exit") and not (live and rival["hp"] < me["hp"]*0.6)):
-            if t >= self.next_exit or self.exit_point is None or math.dist(self.exit_point, p[:2]) < 8:
-                self.next_exit = t + 1.4
-                away = math.atan2(p[1]-rival["pos"][1], p[0]-rival["pos"][0])
-                eye = (*rival["pos"][:2], rival["pos"][2]+self._actor_center(rival)*1.55)
-                best_exit = None
-                for turn in (0, -0.6, 0.6, -1.15, 1.15, -1.57, 1.57):
-                    for length in (22, 45, 72):
-                        xy = p[0]+length*math.cos(away+turn), p[1]+length*math.sin(away+turn)
-                        c = self.arena.cell(*xy)
-                        if c is None or self.arena.clearance[c] < me["stats"]["radius"]+2:
-                            continue
-                        if math.dist(xy,zone["center"]) > zone["radius"]-8:
-                            continue
-                        covered = not self.arena.line_open(eye, (*xy,self.arena.floor[c]+me["stats"]["muzzle_height"]))
-                        gap = math.dist(xy, rival["pos"][:2]) - math.dist(p[:2],rival["pos"][:2])
-                        cost = 0.3*length - 0.7*gap - 40*covered
-                        cost += 0.6*max(0, math.dist(xy,zone["next_center"])-zone["next_radius"])
-                        if best_exit is None or cost < best_exit[0]:
-                            best_exit = cost,xy
-                self.exit_point = best_exit[1] if best_exit else None
-            if self.exit_point:
-                self.goal, self.mode = self.exit_point, "exit"
-                healing = False
-                self.plan_at = t
         drop = self._repair_drop(obs, threats, urgent)
         if drop is not None:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
@@ -844,6 +856,23 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
+        duel = self._nearby_duel(obs, threats) if not urgent else ()
+        if duel and self.mode not in ("drop", "heal"):
+            gun, side = me["weapons"]
+            weakest, distance = min(duel, key=lambda contact:contact[0]["hp"])
+            can_finish = (health := me["hp"]/me["max_hp"]) >= 0.66 and (
+                distance < 94 and gun["ammo"] >= 3 and gun["reload"] <= 0
+                and weakest["hp"] < 2.8*gun["stats"]["damage"])
+            if (side and side["kind"] == "laser" and side["cooldown"] <= 0.1
+                    and health >= 0.75 and distance < 110
+                    and weakest["hp"] < side["stats"]["damage"]*0.75):
+                can_finish = True
+            if can_finish:
+                target, center = weakest, self._actor_center(weakest)
+            elif not (side and side.get("charge",0)>0) and all(distance > 42 and abs(angle_delta(
+                    math.atan2(p[1]-enemy["pos"][1],p[0]-enemy["pos"][0]),enemy["aim"][0])) > 0.6
+                    for enemy, distance in duel):
+                target, center = None, 0
         self._weapons(obs, target, center, act, urgent)
         return act
 
