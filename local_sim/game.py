@@ -528,6 +528,9 @@ class Match:
     def fire(self, p):
         s = p.s
         a = p.action
+        # Exhibition house fillers initiated shots only on the first physics
+        # step after an observation. Entries can keep firing on both steps.
+        house = not self.ffa and p.id != self.subject
         for j, w in enumerate(s["weapons"]):
             if w is None:
                 continue
@@ -535,6 +538,8 @@ class Match:
             k = w["kind"]
             w["cooldown"] = max(-DT, w["cooldown"] - DT)
             trig = a.get("fire", (False, False))[j]
+            if house and self.tick % self.cfg["match"]["decide_every"] and k != "laser":
+                trig = False
             if k == "gun":
                 if w["reload"] > 0:
                     w["reload"] -= DT
@@ -577,7 +582,8 @@ class Match:
                     continue
                 s["energy"] -= st["energy"]
                 p.spent = self.t
-            w["cooldown"] = st["cooldown"] + min(0, w["cooldown"]) if trig else st["cooldown"]
+            remainder = min(0, w["cooldown"]) if trig and not house else 0
+            w["cooldown"] = st["cooldown"] + remainder
             origin = [
                 *s["pos"][:2],
                 s["pos"][2]
