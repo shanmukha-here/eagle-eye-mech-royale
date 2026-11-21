@@ -233,6 +233,27 @@ for line in sys.stdin:
         assert client.act({"tick": 6, "type": "obs"}) == {}
         client.end(16, 0)
         assert client.late >= 1 and client.bad >= 1
+        repair = """import json,sys,time
+for row in sys.stdin:
+ o=json.loads(row)
+ if o["type"]=="hello": print('{"type":"ready"}',flush=True)
+ elif o["type"]=="end": break
+ else:
+  if o["tick"]==0:
+   print("x"*300000,flush=True)
+  print(json.dumps({"tick":o["tick"]}),flush=True)
+  if o["tick"]==0: time.sleep(.09)
+"""
+        client = Client([sys.executable, "-c", repair], hello)
+        assert client.act({"type": "obs", "tick": 0}) == {"tick": 0} and client.bad == 1
+        assert client.act({"type": "obs", "tick": 2, "padding": "x" * 500000}) == {}
+        assert client.partial_input and not client.dead
+        import time
+
+        time.sleep(0.07)
+        assert client.act({"type": "obs", "tick": 4}) == {"tick": 4}
+        client.end(1, 0)
+        print("PASS recovery after oversized output and a partially delivered observation")
         print(
             "PASS spawn, schedule, upgrades, contested capture, four weapon kinds, reload, same-tick and clock placement, timeout/coast, stale tick, crash/idle"
         )

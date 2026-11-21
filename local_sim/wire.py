@@ -7,6 +7,7 @@ import resource
 import select
 import subprocess
 import time
+import uuid
 
 
 def child_limits():
@@ -19,7 +20,10 @@ def valid_action(a, tick):
         return False
 
     def number(v):
-        return type(v) in (float, int) and math.isfinite(v)
+        try:
+            return type(v) in (float, int) and math.isfinite(v)
+        except OverflowError:
+            return False
 
     for k in ("move", "aim", "fire"):
         if k in a and (
@@ -37,6 +41,9 @@ class Client:
     def __init__(self, cmd, hello):
         self.dead = False
         self.buf = b""
+        self.discard_line = False
+        self.partial_input = b""
+        self.container_name = None
         self.late = 0
         self.bad = 0
         self.missed = 0
@@ -46,7 +53,12 @@ class Client:
         self.coast = hello["config"]["bot"]["coast_s"]
         start = time.monotonic()
         if os.path.basename(cmd[0]) == "docker":
-            cmd = cmd[:2] + ["--cpuset-cpus", str(min(os.sched_getaffinity(0)))] + cmd[2:]
+            self.container_name = "eagle-eye-localboard-" + uuid.uuid4().hex
+            cmd = (
+                cmd[:2]
+                + ["--name", self.container_name, "--cpuset-cpus", str(min(os.sched_getaffinity(0)))]
+                + cmd[2:]
+            )
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
@@ -66,16 +78,25 @@ class Client:
 
     def _write(self, m, stop):
         raw = json.dumps(m, separators=(",", ":"), allow_nan=False).encode() + b"\n"
+        # Complete any prefix already sent before writing a fresh JSON line.
+        # At most one partial observation survives a missed write deadline.
+        if self.partial_input:
+            if not self._flush(self.partial_input, stop, started=True):
+                return False
+        return self._flush(raw, stop, started=False)
+
+    def _flush(self, raw, stop, started):
         data = memoryview(raw)
+        self.partial_input = b""
         while data and not self.dead:
             try:
                 n = os.write(self.proc.stdin.fileno(), data)
                 data = data[n:]
+                started = True
             except BlockingIOError:
                 if not select.select([], [self.proc.stdin], [], max(0, stop - time.monotonic()))[1]:
-                    # A partially written line cannot be reused as a new message.
-                    if len(data) != len(raw):
-                        self.dead = True
+                    if started:
+                        self.partial_input = bytes(data)
                     return False
             except BrokenPipeError:
                 self.dead = True
@@ -99,9 +120,17 @@ class Client:
             if not chunk:
                 self.dead = True
                 break
+            if self.discard_line:
+                end = chunk.find(b"\n")
+                if end < 0:
+                    continue
+                chunk = chunk[end + 1 :]
+                self.discard_line = False
             self.buf += chunk
-            if len(self.buf) > 2 * self.max_line and b"\n" not in self.buf:
-                self.dead = True
+            if len(self.buf) > self.max_line and b"\n" not in self.buf:
+                self.bad += 1
+                self.buf = b""
+                self.discard_line = True
         return None
 
     def act(self, o):
@@ -136,6 +165,14 @@ class Client:
     def close(self):
         if self.proc.poll() is None:
             self.proc.kill()
+            if self.container_name:
+                subprocess.run(
+                    ["docker", "rm", "-f", self.container_name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    check=False,
+                )
         self.proc.wait()
         self.proc.stdin.close()
         self.proc.stdout.close()

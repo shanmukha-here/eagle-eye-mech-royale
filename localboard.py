@@ -33,6 +33,7 @@ SPLITS = {
     "dev": (420000, 96),
     "holdout": (860000, 200),
     "devcheck": (520000, 256),
+    "encounter-dev": (620000, 256),
     "confirm": (960000, 400),
 }
 DEFAULT_MIX = 3
