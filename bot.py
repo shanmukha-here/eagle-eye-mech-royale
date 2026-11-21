@@ -774,7 +774,9 @@ class Bot(PlacementBot):
                 abs(angle_delta(bearing, foe["aim"][0])) > math.radians(vision["fov_deg"]/2)):
             return False
         eye = (x,y,z+self.cfg["mech"]["eye_height"]*(1+.05*foe.get("cubes",0)))
-        return not (self.exposure.screened(eye, point) if self.exposure else not self.arena.line_open(eye, point))
+        if self.exposure:
+            return not self.exposure.screened(eye, point)
+        return self.arena.line_open(eye, point)
 
     def _safe_point(self, obs, threats, late):
         z = obs["zone"]
@@ -884,7 +886,7 @@ class Bot(PlacementBot):
         if target.get("kind")!="mech":
             if self.loot_quiet and (any(d<self.loot_range for _,d,_ in threats) or
                     obs["t"]-self.last_contact<5 or any(s["kind"] in ("gun","laser","lightning","mortar") and
-                    s.get("band") in ("near","mid") for s in obs["sounds"])):
+                    s.get("dist") in ("near","mid") for s in obs["sounds"])):
                 self.flags.add("quiet_loot")
                 return None,0
             return target,center

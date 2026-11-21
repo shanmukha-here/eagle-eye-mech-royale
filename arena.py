@@ -284,16 +284,18 @@ class Exposure:
         world = json.loads((Path(directory) / "v2/world.json").read_bytes())
         trees = world["trees"]
         self.crowns = {}
+        self.crown_bases = {}
         names = trees["fields"]
         for start in range(0, len(trees["data"]), len(names)):
             tree = dict(zip(names, trees["data"][start:start+len(names)]))
             r = tree["crownR"]
-            x, y = tree["x"], tree["y"]
+            x, y = tree["crownX"], tree["crownY"]
             for j in range(math.floor((y-r-arena.y0)/6), math.ceil((y+r-arena.y0)/6)+1):
                 for i in range(math.floor((x-r-arena.x0)/6), math.ceil((x+r-arena.x0)/6)+1):
                     if (0 <= i < arena.gw and 0 <= j < arena.gh and
                         math.hypot(arena.x0+6*i-x, arena.y0+6*j-y) <= r):
                         node = j*arena.gw+i
+                        self.crown_bases[node] = min(self.crown_bases.get(node, math.inf), tree["z"] + tree["crownBase"])
                         self.crowns[node] = max(self.crowns.get(node, -math.inf), tree["z"]+tree["height"])
         self.cover = bytearray(len(arena.cells))
         self.roofs = []
@@ -333,7 +335,8 @@ class Exposure:
         for i in range(1, n):
             t = i/n
             x, y, z = (u+t*(v-u) for u,v in zip(source, dest))
-            if self.crowns.get(self.node(x,y), -math.inf) > z:
+            node = self.node(x,y)
+            if self.crown_bases.get(node, math.inf) <= z < self.crowns.get(node, -math.inf):
                 foliage += length/n
                 if foliage >= 8:
                     return True
