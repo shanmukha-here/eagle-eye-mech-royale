@@ -22,6 +22,8 @@ class Bot:
         self.arena = Arena(hello["map"]["dir"], self.cfg["mech"])
         self.nav = Navigator(self.arena)
         self.seed_angle = math.tau * ((hello["seed"] % 10007) / 10007)
+        self.surv = False
+        self.avoiding = False
         self.drones = {}
         self.previous_target = None
         self.charge_since = {}
@@ -236,7 +238,7 @@ class Bot:
                     add(point[0]+ux*55, point[1]+uy*55, "drone", 140, detour=True)
         if not urgent and me["cubes"] < 12:
             for point, kind, seen in self.loot.values():
-                if kind == "cube" and math.dist(pos,point) < (33 if not self.uncredited_eliminations >= 1 else 70 if threats and me["hp"] > 0.4*me["max_hp"] else 33 if threats else 160) and abs(point[2]-pos[2]) < 5:
+                if kind == "cube" and math.dist(pos,point) < (33 if not self.uncredited_eliminations >= 1 else (0 if self.surv else 70) if threats and me["hp"] > 0.4*me["max_hp"] else (0 if self.surv else 33) if threats else 160) and abs(point[2]-pos[2]) < 5:
                     add(*point[:2],kind,240,detour=True)
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
@@ -274,7 +276,10 @@ class Bot:
                 confidence = me["hp"]/max(enemy_hp,1)
                 crowd = sum(1 for m,_,_ in threats if m["id"] != enemy["id"]
                             and math.dist(m["pos"][:2],enemy["pos"][:2]) < 52)
-                if crowd or confidence < 0.84:
+                endgame = self.uncredited_eliminations >= 1 and not self.surv and enemy_hp < 0.6*enemy.get("max_hp", self.cfg["mech"]["hp"])
+                if self.surv and not self._prey(enemy, [m for m, _, _ in threats]):
+                    continue
+                if (crowd and not endgame) or (confidence < 0.84 and not endgame):
                     continue
                 facing = math.atan2(y-enemy["pos"][1], x-enemy["pos"][0])
                 looking_away = abs(angle_delta(facing,enemy["aim"][0])) > 1.15
@@ -282,6 +287,7 @@ class Bot:
                     continue
                 stamina = 15 if enemy["id"] == self.encounter and obs["t"] < self.encounter_until else 0
                 bonus = 54 + min(24, max(0,confidence-1)*25) + 14*looking_away + stamina
+                bonus += 30*endgame
                 px,py = enemy["pos"][:2]
                 dx,dy = direction(x-px,y-py)
                 spacing = 22 if me["weapons"][1] else 32
@@ -386,6 +392,11 @@ class Bot:
                         and math.dist(s[:2], p[:2]) < self.cfg["loot"]["pickup_radius"]):
                     act["take"] = item["id"]
                     break
+
+    def _prey(self, m, mechs):
+        # A mech worth fighting mid-game: damaged and with no other mech near it.
+        weak = m.get("hp", self.cfg["mech"]["hp"]) < 0.6*m.get("max_hp", self.cfg["mech"]["hp"])
+        return weak and not any(q["id"] != m["id"] and math.dist(q["pos"][:2], m["pos"][:2]) < 60 for q in mechs)
 
     def _target(self, obs, threats, npcs, urgent):
         me = obs["self"]
@@ -554,14 +565,14 @@ class Bot:
             retreat = 0.65 if d < 40 or pressured else 0.15
             secondary = me["weapons"][1]
             hp_fraction = me["hp"]/me["max_hp"]
-            if secondary and secondary["kind"] == "lightning" and len(live) <= 2 and not urgent and hp_fraction > .63 and d < 135:
+            if not self.avoiding and secondary and secondary["kind"] == "lightning" and len(live) <= 2 and not urgent and hp_fraction > .63 and d < 135:
                 if d > secondary["stats"]["range"]*.76:
                     retreat = -3.5
                 elif d < 19:
                     retreat = 1.4
                 else:
                     retreat = 0
-            elif len(live) == 1 and not urgent and hp_fraction > 0.62 and not pressured:
+            elif not self.avoiding and len(live) == 1 and not urgent and hp_fraction > 0.62 and not pressured:
                 if secondary and secondary["kind"] == "lightning" and 29 < d < 100:
                     retreat = -2.8
                 elif m.get("hp", me["hp"]) < me["hp"]*0.64 and 25 < d < 100:
@@ -570,7 +581,7 @@ class Bot:
             faced = abs(angle_delta(inbound, m["aim"][0])) < 0.55
             if faced and not urgent and d < 215:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
-            if len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
+            if not self.avoiding and len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
@@ -698,6 +709,27 @@ class Bot:
             boosting = me["energy"] > 10
         if self.blocked_count >= 2 and me["grounded"] and not jumping:
             boosting = False
+        if dangers and not urgent:
+            stats = me["stats"]
+            use_boost = True and me["energy"] > 25 and me["grounded"]
+            speed = stats["boost_speed"] if use_boost else stats["walk_speed"]
+
+            def clear_of(ax, ay, sp):
+                ox, oy = ax*sp - me["vel"][0], ay*sp - me["vel"][1]
+                change = math.hypot(ox, oy) / stats["ground_accel" if me["grounded"] else "air_accel"]
+                worst = 99
+                for eta, mx, my, vx, vy in dangers:
+                    drift = eta - 0.5*change if eta >= change else 0.5*eta**2/max(0.001, change)
+                    worst = min(worst, abs((mx + ox*drift)*vy - (my + oy*drift)*vx)/max(1, math.hypot(vx, vy)))
+                return worst
+            need = stats["radius"] + 0.75
+            if clear_of(best[0], best[1], stats["walk_speed"]) < need:
+                options = [(math.cos(k*math.tau/16), math.sin(k*math.tau/16)) for k in range(16)]
+                options = [d for d in options if self.arena.travel_room(p, d, 4, stats) > 2]
+                if options:
+                    pick = max(options, key=lambda d: clear_of(d[0], d[1], speed))
+                    if clear_of(pick[0], pick[1], speed) > clear_of(best[0], best[1], stats["walk_speed"]):
+                        best, boosting = pick, use_boost
         return best, boosting, jumping
 
     def act(self, obs):
@@ -705,6 +737,7 @@ class Bot:
         p = me["pos"]
         self.mech_kills += sum(e["type"] == "kill" and 0 <= e["target"] < 16 for e in obs["events"])
         self.uncredited_eliminations = max(0, 16 - obs["alive"] - self.mech_kills)
+        self.surv = self.uncredited_eliminations >= 1 and obs["alive"] > 3
         self.charge_since = {
             m["id"]: self.charge_since.get(m["id"], t) for m in obs["mechs"] if m.get("charging")
         }
@@ -731,6 +764,10 @@ class Bot:
         hp_fraction = me["hp"]/me["max_hp"]
         burst = sum(amount for _, amount in self.damage_window) / me["max_hp"]
         pressured = len(live) >= 2 or hp_fraction < 0.57 or (hp_fraction < 0.88 and burst > 0.19)
+        mechs = [m for m, _, _ in threats]
+        self.avoiding = self.surv and any(not self._prey(m, mechs) for m in live)
+        if self.avoiding:
+            pressured = True
         if me["in_zone"] and hp_fraction < 0.88 and (attackers or (pressured and live)):
             missing = max(0, 0.93*me["max_hp"] - me["hp"])
             self.recover_until = t + me["stats"]["regen_delay"] + missing/max(1, me["stats"]["regen_per_s"]) + 1
