@@ -26,6 +26,8 @@ from local_sim.wire import Client
 
 ROOT = Path(__file__).resolve().parent
 REFS = {
+    "crystal": "b260cc20ef2ba57e8aa8d14569b944e1774a47bf",
+    "rangegear": "7b2492ccb46b57f62e0e508f41e73e932259dfbb",
     "phase5": "6c7bb86707e76a288050da27e945f076f78227cc",
     "phase1": "f4e346ad250f0ca69a4803e760e2ab482f2f4cd6",
     "phase2": "30cd61654c5d03c2a3131448259c9b4603796fd5",
@@ -59,6 +61,9 @@ SPLITS = {
     "p7test": (2500000, 400),
     "p8select": (2600000, 200),
     "p8test": (2700000, 200),
+    "p9dev": (2800000, 64),
+    "p9select": (2801000, 128),
+    "p9test": (2900000, 400),
 }
 DEFAULT_MIX = 3
 
@@ -365,12 +370,12 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test"),
-        default="p8test",
+        choices=("holdout", "confirm", "p4test", "p5test", "p5final", "p6test", "p7test", "p8test", "p9test"),
+        default="p9test",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
-    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["phase5", "candidate"])
+    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["phase5", "crystal", "rangegear", "candidate"])
     ap.add_argument("--mix", type=int, choices=range(5), default=DEFAULT_MIX)
     ap.add_argument("--workers", type=int, help="default: 6 in Docker, 48 native")
     ap.add_argument(
@@ -443,7 +448,7 @@ def main():
             initargs=(cpus,),
         ) as pool:
             for split in (
-                ({"p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
+                ({"p9test": "p9dev", "p8test": "p8select", "p7test": "p7screen", "p6test": "p6dev", "p5final": "p5dev", "p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
                 if args.split == "all"
                 else [args.split]
             ):
@@ -471,7 +476,8 @@ def main():
                         "mean_kills": statistics.mean(r["kills"] for r in rows),
                     }
                     print(split, name, json.dumps(out[name]), flush=True)
-                reference = next((name for name in ("phase5", "phase4", "phase3", "phase2") if name in groups), None)
+                references = [name for name in ("phase5", "crystal", "rangegear", "phase4", "phase3", "phase2") if name in groups]
+                reference = max(references, key=lambda name: official_scores.get(REFS[name][:7], -1), default=None)
                 if "candidate" in groups and reference in groups:
                     delta = [
                         a["points"] - b["points"] for a, b in zip(groups["candidate"], groups[reference])

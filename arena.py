@@ -215,6 +215,8 @@ class Navigator:
         self.key = None
         self.last_start = None
         self.last_goal_xy = None
+        self.exposure = None
+        self.cover_cost = 0.0
 
     def waypoint(self, pos, dest, radius):
         a = self.arena
@@ -259,6 +261,8 @@ class Navigator:
                 nx, ny = a.points[neighbor]
                 distance = (8.486 if x != nx and y != ny else 6.0)
                 new = cost + distance + max(0, room + 2 - clearance)*0.5
+                if self.exposure is not None:
+                    new += distance * self.cover_cost * (1 - min(8, self.exposure.cover[neighbor])/8)
                 if new < self.cost.get(neighbor, math.inf):
                     self.cost[neighbor] = new
                     self.parent[neighbor] = n
@@ -271,3 +275,102 @@ class Navigator:
         if start == goal and math.dist(a.points[goal], dest) > 8:
             return a.points[goal]
         return dest
+
+
+class Exposure:
+    """Six-metre cells describing cover, foliage and possible roof landings."""
+
+    def __init__(self, arena, directory):
+        self.arena = arena
+        world = json.loads((Path(directory) / "v2/world.json").read_bytes())
+        trees = world["trees"]
+        self.crowns = {}
+        self.crown_bases = {}
+        names = trees["fields"]
+        for start in range(0, len(trees["data"]), len(names)):
+            tree = dict(zip(names, trees["data"][start : start + len(names)]))
+            r = tree["crownR"]
+            x, y = tree["crownX"], tree["crownY"]
+            for j in range(
+                math.floor((y - r - arena.y0) / 6),
+                math.ceil((y + r - arena.y0) / 6) + 1,
+            ):
+                for i in range(
+                    math.floor((x - r - arena.x0) / 6),
+                    math.ceil((x + r - arena.x0) / 6) + 1,
+                ):
+                    if (
+                        0 <= i < arena.gw
+                        and 0 <= j < arena.gh
+                        and math.hypot(arena.x0 + 6 * i - x, arena.y0 + 6 * j - y) <= r
+                    ):
+                        node = j * arena.gw + i
+                        self.crown_bases[node] = min(
+                            self.crown_bases.get(node, math.inf),
+                            tree["z"] + tree["crownBase"],
+                        )
+                        self.crowns[node] = max(
+                            self.crowns.get(node, -math.inf), tree["z"] + tree["height"]
+                        )
+        self.cover = bytearray(len(arena.cells))
+        self.roofs = []
+        for n, cell in enumerate(arena.cells):
+            i, j = n % arena.gw, n // arena.gw
+            ground = arena.floor[cell]
+            if 4 < arena.top[cell] - ground < 32:
+                self.roofs.append(n)
+            if not arena.links[n]:
+                continue
+            shield = 0
+            for di, dj in (
+                (1, 0),
+                (-1, 0),
+                (0, 1),
+                (0, -1),
+                (1, 1),
+                (-1, 1),
+                (1, -1),
+                (-1, -1),
+            ):
+                for r in (1, 3, 6):
+                    col, row = i + di * r, j + dj * r
+                    if not (0 <= col < arena.gw and 0 <= row < arena.gh):
+                        break
+                    other = arena.cells[row * arena.gw + col]
+                    if (
+                        arena.floor[other] > ground + 6
+                        or arena.bottom[other] < ground + 8 < arena.top[other]
+                    ):
+                        shield += 1
+                        break
+            self.cover[n] = shield + (
+                2 if self.crowns.get(n, -math.inf) > ground + 6 else 0
+            )
+
+    def node(self, x, y):
+        a = self.arena
+        i = min(a.gw - 1, max(0, round((x - a.x0) / 6)))
+        j = min(a.gh - 1, max(0, round((y - a.y0) / 6)))
+        return j * a.gw + i
+
+    def screened(self, source, dest):
+        if not self.arena.line_open(source, dest):
+            return True
+        length = math.dist(source[:2], dest[:2])
+        if length <= 45:
+            return False
+        n = max(1, math.ceil(length / 4))
+        foliage = 0
+        for i in range(1, n):
+            t = i / n
+            x, y, z = (u + t * (v - u) for u, v in zip(source, dest))
+            node = self.node(x, y)
+            if (
+                self.crown_bases.get(node, math.inf)
+                <= z
+                < self.crowns.get(node, -math.inf)
+            ):
+                foliage += length / n
+                if foliage >= 8:
+                    return True
+        return False
