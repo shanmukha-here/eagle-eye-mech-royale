@@ -730,6 +730,37 @@ class Bot:
                     pick = max(options, key=lambda d: clear_of(d[0], d[1], speed))
                     if clear_of(pick[0], pick[1], speed) > clear_of(best[0], best[1], stats["walk_speed"]):
                         best, boosting = pick, use_boost
+        if incoming_charge and not urgent and not self.blocked_count:
+            ex, ey, ez, normal, offset, remaining = incoming_charge
+            stats = me["stats"]
+            laser_boost = me["energy"] > 25 and me["grounded"]
+            accel = stats["ground_accel" if me["grounded"] else "air_accel"]
+            beam_range = max(1, math.hypot(p[0] - ex, p[1] - ey))
+
+            def beam_miss(ax, ay, sp):
+                v0x, v0y = me["vel"][0], me["vel"][1]
+                ox, oy = ax*sp - v0x, ay*sp - v0y
+                change = math.hypot(ox, oy) / accel
+                f = min(1, remaining / max(0.001, change))
+                vx, vy = v0x + ox*f, v0y + oy*f
+                ramp = min(remaining, change)
+                rx = p[0] + (v0x + vx)/2*ramp + vx*(remaining - ramp)
+                ry = p[1] + (v0y + vy)/2*ramp + vy*(remaining - ramp)
+                miss = abs(vx*normal[0] + vy*normal[1]) * (0.1 + 1.0*beam_range/252)
+                if 20.0 and not self.arena.line_open((ex, ey, ez + 7), (rx, ry, p[2] + 4.5)):
+                    miss += 20.0
+                return miss
+            options = [(math.cos(k*math.tau/16), math.sin(k*math.tau/16)) for k in range(16)]
+            options = [d for d in options if self.arena.travel_room(p, d, 4, stats) > 2]
+            laser_speed = stats["boost_speed"] if laser_boost else stats["walk_speed"]
+            if dangers and "clear_of" in locals():
+                safe = [d for d in options if clear_of(d[0], d[1], laser_speed) >= stats["radius"] + 0.75]
+                options = safe or options
+            if options:
+                now = beam_miss(best[0], best[1], stats["boost_speed"] if boosting else stats["walk_speed"])
+                pick = max(options, key=lambda d: beam_miss(d[0], d[1], laser_speed))
+                if beam_miss(pick[0], pick[1], laser_speed) > now + 0.3:
+                    best, boosting = pick, laser_boost
         return best, boosting, jumping
 
     def act(self, obs):
