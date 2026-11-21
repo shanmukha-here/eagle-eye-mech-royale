@@ -4,7 +4,7 @@ import math
 import os
 import select
 
-from arena import Arena, Navigator
+from arena import Arena, Exposure, Navigator
 
 
 def direction(dx, dy):
@@ -16,7 +16,7 @@ def angle_delta(a, b):
     return (a-b+math.pi) % math.tau-math.pi
 
 
-class Bot:
+class PlacementBot:
     def __init__(self, hello):
         self.cfg = hello["config"]
         self.arena = Arena(hello["map"]["dir"], self.cfg["mech"])
@@ -745,6 +745,263 @@ class Bot:
         return act
 
 
+# Weapon search, circle routing, silent travel, sight avoidance, quiet loot, fire discipline, and endgame.
+SWITCHES = (True, True, True, True, True, True, True)
+# Quiet fraction, clock reserve (s), sight cost, loot exclusion (m), duel TTK ratio, endgame radius (m).
+TUNING = (0.40, 20.0, 0.75, 220.0, 0.65, 140.0)
+
+
+class Bot(PlacementBot):
+    def __init__(self, hello):
+        super().__init__(hello)
+        self.weapon_first, self.circle_route, self.quiet, self.avoid, self.loot_quiet, self.discipline, self.endgame = SWITCHES
+        self.speed, self.margin, self.sight_cost, self.loot_range, self.duel_ratio, self.late_radius = TUNING
+        self.exposure = Exposure(self.arena, hello["map"]["dir"]) if self.avoid or self.endgame else None
+        self.nav.exposure = self.exposure if self.avoid else None
+        self.nav.cover_cost = self.sight_cost
+        self.counts = {}
+        self.flags = set()
+        self.zone_key = None
+        self.anchor = None
+        self.escape = False
+
+    def _in_view(self, foe, point):
+        x, y, z = foe["pos"]
+        d = math.dist((x,y), point[:2])
+        vision = self.cfg["vision"]
+        bearing = math.atan2(point[1]-y, point[0]-x)
+        if d > vision["range"] or (d > vision["near_range"] and
+                abs(angle_delta(bearing, foe["aim"][0])) > math.radians(vision["fov_deg"]/2)):
+            return False
+        eye = (x,y,z+self.cfg["mech"]["eye_height"]*(1+.05*foe.get("cubes",0)))
+        return not (self.exposure.screened(eye, point) if self.exposure else not self.arena.line_open(eye, point))
+
+    def _safe_point(self, obs, threats, late):
+        z = obs["zone"]
+        pos = obs["self"]["pos"]
+        cx,cy = z["next_center"]
+        r = z["next_radius"]
+        if r < 7:
+            return (cx,cy), "zone"
+        dx,dy = direction(pos[0]-cx,pos[1]-cy)
+        radial = min(.70*r, math.dist(pos[:2],(cx,cy)))
+        center = (cx+dx*radial, cy+dy*radial)
+        a = self.arena
+        choices = []
+        for length in (0, min(24,r*.35), min(54,r*.62)):
+            for j in range(8 if length else 1):
+                x = center[0]+length*math.cos(j*math.pi/4)
+                y = center[1]+length*math.sin(j*math.pi/4)
+                if math.hypot(x-cx,y-cy)>r-min(8,.2*r):
+                    continue
+                node = a.nearest((x,y),room=obs["self"]["stats"]["radius"]+2.1)
+                if node is None:
+                    continue
+                x,y = a.points[node]
+                cell = a.cells[node]
+                d = math.dist((x,y),pos[:2])
+                score = -.06*d
+                if self.exposure:
+                    score += self.exposure.cover[node]*(3 if late else 1.8)*self.sight_cost
+                    point=(x,y,a.floor[cell]+5)
+                    score -= 18*self.sight_cost*sum(self._in_view(m,point) for m,_,_ in threats[:3])
+                choices.append((score,x,y,"haven" if late else "route"))
+        if late and self.exposure:
+            # Only consider roofs within a short jet trip from our current ground region.
+            for dx in (-18,-9,0,9,18):
+                for dy in (-18,-9,0,9,18):
+                    x,y=pos[0]+dx,pos[1]+dy
+                    c=a.cell(x,y)
+                    if c is None or math.hypot(x-cx,y-cy)>r-6:
+                        continue
+                    rise=a.top[c]-pos[2]
+                    me=obs["self"]
+                    if (3 < rise < 18 and math.hypot(dx,dy)<24 and
+                        (rise/me["stats"]["max_rise_speed"]+.7)*me["stats"]["jet_drain"]+18 < me["energy"]):
+                        near=a.nearest((x,y),room=me["stats"]["radius"]+2)
+                        if near is not None and math.dist(a.points[near],(x,y))<12:
+                            choices.append((4+rise*.25-.18*math.hypot(dx,dy),x,y,"roof"))
+        if not choices:
+            return (cx,cy),"zone"
+        _,x,y,mode=max(choices)
+        return (x,y),mode
+
+    def _choose_goal(self, obs, threats, pressured, urgent):
+        super()._choose_goal(obs,threats,pressured,urgent)
+        me,z=obs["self"],obs["zone"]
+        pos=me["pos"]
+        armed=me["weapons"][1] is not None
+        if self.weapon_first and not armed and not urgent:
+            choices=[]
+            origin=self.arena.nearest(pos,room=me["stats"]["radius"]+2)
+            for point,kind,last in self.loot.values():
+                if kind not in ("laser","lightning","mortar") or obs["t"]-last>12:
+                    continue
+                n=self.arena.cell(*point[:2])
+                if n is None or abs(point[2]-self.arena.floor[n])>3 or origin is None:
+                    continue
+                target=self.arena.nearest(point,self.arena.components[origin],me["stats"]["radius"]+2)
+                if target is None or math.dist(self.arena.points[target],point[:2])>8:
+                    continue
+                distance=math.dist(pos,point)
+                back=max(0,math.dist(point[:2],z["next_center"])-z["next_radius"]+8)
+                if 1.45*(distance+back)/me["stats"]["walk_speed"]+5 < z["shrink_end"]-obs["t"]:
+                    choices.append((distance-(22 if kind=="laser" else 0),point,kind))
+            if choices:
+                _,q,self.mode=min(choices)
+                self.goal=tuple(q[:2])
+                self.flags.add("weapon_route")
+                return
+        if self.loot_quiet and self.mode=="drop" and any(d<95 for _,d,_ in threats):
+            self.goal,self.mode=self._safe_point(obs,threats,False)
+            self.flags.add("uncontested_drop")
+        late=self.endgame and z["radius"]<=self.late_radius
+        if not (late or self.circle_route and armed):
+            return
+        key=(tuple(z["next_center"]),z["next_radius"],late)
+        if self.zone_key!=key or self.anchor is None:
+            self.anchor=self._safe_point(obs,threats,late)
+            self.zone_key=key
+        goal,mode=self.anchor
+        # Accept only silent pickups close to the direct route to the selected safe point.
+        if self.mode in ("cube","laser","lightning") and not urgent:
+            extra=math.dist(pos[:2],self.goal)+math.dist(self.goal,goal)-math.dist(pos[:2],goal)
+            if extra<10 and math.dist(pos[:2],self.goal)<40:
+                self.flags.add("on_route_loot")
+                return
+        self.goal,self.mode=goal,mode
+        self.flags.add("endgame" if late else "circle_route")
+        if mode=="roof":
+            self.flags.add("roof")
+            self.shortcut_until=obs["t"]+2
+
+    def _target(self, obs, threats, npcs, urgent):
+        target,center=super()._target(obs,threats,npcs,urgent)
+        self.escape=False
+        if target is None:
+            return target,center
+        me=obs["self"]
+        if target.get("kind")!="mech":
+            if self.loot_quiet and (any(d<self.loot_range for _,d,_ in threats) or
+                    obs["t"]-self.last_contact<5 or any(s["kind"] in ("gun","laser","lightning","mortar") and
+                    s.get("band") in ("near","mid") for s in obs["sounds"])):
+                self.flags.add("quiet_loot")
+                return None,0
+            return target,center
+        if not self.discipline:
+            return target,center
+        q=target["pos"]
+        point=(*me["pos"][:2],me["pos"][2]+me["stats"]["height"]*.5)
+        rear=abs(angle_delta(math.atan2(point[1]-q[1],point[0]-q[0]),target["aim"][0]))>math.pi/2
+        unseen=not self._in_view(target,point)
+        dist=math.dist(q,me["pos"])
+        def damage(kinds,cubes):
+            dps=0.
+            for kind in kinds:
+                st=self.cfg["weapons"][kind]
+                if kind=="gun":
+                    dps+=st["damage"]*st["mag"]/(st["cooldown"]*st["mag"]+st["reload"])*.73
+                elif kind=="laser":
+                    dps+=st["damage"]/(st["charge"]+st["cooldown"])*.80
+                elif kind=="lightning" and dist<=st["range"]:
+                    dps+=st["damage"]/st["cooldown"]
+                elif kind=="mortar" and dist<145:
+                    dps+=st["splash"]*.45/st["cooldown"]
+            return max(1,dps*(1+.04*min(10,cubes)))
+        ours=damage([w["kind"] for w in me["weapons"] if w],me["cubes"])
+        theirs=damage(target["weapons"],target.get("cubes",0))*max(1,len(threats)**.5)
+        winning=target.get("hp",1400)/ours<self.duel_ratio*me["hp"]/theirs
+        if unseen and rear or winning:
+            self.flags.add("ambush" if unseen and rear else "favorable")
+            return target,center
+        recently_hit=bool(self.damage_window and obs["t"]-self.damage_window[-1][0]<1.4)
+        self.escape=recently_hit
+        if recently_hit:
+            # Test nearby cover reachable in about one second before returning fire.
+            eye=(*q[:2],q[2]+7)
+            for u,v in ((1,0),(-1,0),(0,1),(0,-1)):
+                p=(point[0]+u*10,point[1]+v*10,point[2])
+                if (not self.arena.line_open(eye,p) and
+                        self.arena.travel_room(me["pos"],(u,v),10,me["stats"])>=8):
+                    self.goal,self.mode=p[:2],"escape"
+                    break
+            else:
+                self.flags.add("return_fire")
+                return target,center
+        self.flags.add("hold_fire")
+        return None,0
+
+    def _loadout(self, obs, act):
+        super()._loadout(obs,act)
+        me=obs["self"]
+        if self.weapon_first and me["weapons"][1] is None and "take" not in act:
+            for item in obs["pickups"]:
+                if item["kind"]=="mortar" and abs(item["pos"][2]-me["pos"][2])<=4 and math.dist(item["pos"][:2],me["pos"][:2])<=self.cfg["loot"]["pickup_radius"]:
+                    act["take"]=item["id"]
+                    self.flags.add("mortar_pickup")
+                    break
+
+    def act(self, obs):
+        self.flags.clear()
+        action=super().act(obs)
+        me,z=obs["self"],obs["zone"]
+        pos=me["pos"]
+        if self.weapon_first and self.mode=="mortar" and me["weapons"][1] is None:
+            self.flags.add("weapon_route")
+        side=me["weapons"][1]
+        if self.weapon_first and side and side["kind"]=="mortar" and action.get("fire",[False])[0] and side["cooldown"]<=.1:
+            # The optional game item shares the turret. Use it at close range where a low arc works.
+            nearby=[m for m in obs["mechs"] if m["kind"]=="mech" and 14<math.dist(pos,m["pos"])<65]
+            if nearby:
+                m=min(nearby,key=lambda m:math.dist(pos,m["pos"]))
+                if abs(angle_delta(action["aim"][0],math.atan2(m["pos"][1]-pos[1],m["pos"][0]-pos[0])))<.08:
+                    action["fire"][1]=True
+                    self.flags.add("mortar_fire")
+        if self.avoid and obs["mechs"] and obs["tick"]%4==0 and not self.escape:
+            move=action["move"]
+            foes=[m for m in obs["mechs"] if m["kind"]=="mech"][:3]
+            if foes and math.hypot(*move)>.2:
+                options=[]
+                theta=math.atan2(move[1],move[0])
+                for delta in (0,.70,-.70,1.35,-1.35):
+                    u,v=math.cos(theta+delta),math.sin(theta+delta)
+                    if self.arena.travel_room(pos,(u,v),9,me["stats"])<6:
+                        continue
+                    x,y=pos[0]+u*11,pos[1]+v*11
+                    n=self.exposure.node(x,y)
+                    point=(x,y,max(pos[2],self.arena.floor[self.arena.cells[n]])+5)
+                    exposure=sum(self._in_view(m,point) for m in foes)
+                    cost=(exposure*3-self.exposure.cover[n]*.13)*self.sight_cost+abs(delta)
+                    options.append((cost,abs(delta),u,v))
+                if options:
+                    _,turn,u,v=min(options)
+                    if turn:
+                        self.flags.add("avoid_view")
+                        action["move"]=(u,v)
+        if self.quiet:
+            outside=max(0,math.dist(pos[:2],z["next_center"])-z["next_radius"]+7)
+            travel=outside*1.6
+            if self.nav.route and self.mode in ("route","haven","zone") and outside>0:
+                route=[pos[:2]]+[self.arena.points[n] for n in self.nav.route]
+                travel=max(travel,sum(math.dist(a,b) for a,b in zip(route,route[1:])))
+            quiet_speed=min(self.cfg["sound"]["step_speed"]-.2,self.speed*me["stats"]["walk_speed"])
+            slack=z["shrink_end"]-obs["t"]-self.margin
+            clock=not me["in_zone"] or travel>0 and travel>max(0,slack)*quiet_speed
+            if not self.escape and not clock:
+                move=action["move"]
+                length=math.hypot(*move)
+                cap=quiet_speed/me["stats"]["walk_speed"]
+                if length>cap:
+                    action["move"]=(move[0]*cap/length,move[1]*cap/length)
+                    self.flags.add("quiet")
+            if clock:
+                self.flags.add("clock")
+            action["boost"]=bool(self.escape and me["energy"]>18 and me["grounded"])
+        for name in self.flags:
+            self.counts[name]=self.counts.get(name,0)+1
+        return action
+
+
 def run():
     pending = b""
     bot = None
@@ -767,6 +1024,8 @@ def run():
                 continue
             msg = json.loads(line)
             if msg["type"] == "end":
+                if bot is not None:
+                    os.write(2, b"MECH_SWITCHES "+json.dumps(bot.counts).encode()+b"\n")
                 return
             if msg["type"] == "hello":
                 bot = Bot(msg)
