@@ -22,6 +22,8 @@ class Bot:
         self.arena = Arena(hello["map"]["dir"], self.cfg["mech"])
         self.nav = Navigator(self.arena)
         self.seed_angle = math.tau * ((hello["seed"] % 10007) / 10007)
+        self.previous_target = None
+        self.charge_since = {}
         self.loot = {}
         self.plan_at = -1
         self.goal = (0, 0)
@@ -164,6 +166,27 @@ class Bot:
             for point, kind, seen in self.loot.values():
                 if kind in ("laser", "lightning") and abs(point[2] - pos[2]) <= 4 and math.dist(pos, point) < 140:
                     add(*point[:2], kind, 155 - 2 * (obs["t"] - seen), detour=True)
+        if not urgent and me["weapons"][1] is None:
+            # The destination may be at a different ground elevation from our feet.
+            travel_budget = (zone["shrink_end"] - obs["t"] - 8) * me["stats"]["walk_speed"] / 1.65
+            for point, kind, seen in self.loot.values():
+                if kind != "laser":
+                    continue
+                cell = self.arena.cell(*point[:2])
+                if cell is None or abs(self.arena.floor[cell] - point[2]) > 4:
+                    continue
+                if self.arena.clearance[cell] < me["stats"]["radius"] + 2:
+                    continue
+                distance = math.dist(pos, point)
+                if distance > 210:
+                    continue
+                return_distance = max(0, math.dist(point[:2], zone["next_center"]) - radius + 9)
+                if distance + return_distance > travel_budget:
+                    continue
+                if math.dist(point[:2], zone["center"]) > zone["radius"] - 6:
+                    continue
+                score = 220 - distance * 0.26 - min(35, (obs["t"] - seen) * 0.4)
+                goals.append((score, *point[:2], "laser"))
         if not urgent and radius > 7 and (not retreat or
                 (len(threats) == 1 and me["hp"] > 0.60*me["max_hp"] and not me["weapons"][1])):
             values = {"cube": 44, "lightning": 37, "laser": 36, "crate": 21}
@@ -355,6 +378,15 @@ class Bot:
         # The laser fires on release. Switch to the observed center for its release tick.
         laser_due = laser and charge >= side["stats"]["charge"]-0.095
         seconds = max(0, distance-3)/max(1, gun["stats"]["speed"]) if gun else 0
+        if target.get("kind") == "mech":
+            if self.previous_target and self.previous_target[0] == target["id"]:
+                _, last_time, old_vx, old_vy = self.previous_target
+                elapsed = obs["t"] - last_time
+                if 0.045 < elapsed < 0.22:
+                    horizon = min(seconds, 0.48)
+                    vx += max(-28, min(28, (vx - old_vx) / elapsed)) * horizon * 0.52
+                    vy += max(-28, min(28, (vy - old_vy) / elapsed)) * horizon * 0.52
+            self.previous_target = (target["id"], obs["t"], *target["vel"][:2])
         if laser_due:
             seconds = 0
         point = (q[0]+vx*seconds, q[1]+vy*seconds, q[2]+center+vz*seconds)
@@ -470,6 +502,12 @@ class Bot:
                     retreat = -2.8
                 elif m.get("hp", me["hp"]) < me["hp"]*0.64 and 25 < d < 100:
                     retreat = -1.2
+            inbound = math.atan2(p[1] - m["pos"][1], p[0] - m["pos"][0])
+            faced = abs(angle_delta(inbound, m["aim"][0])) < 0.55
+            if faced and not urgent and d < 215:
+                side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
+            if len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
+                retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
@@ -511,12 +549,32 @@ class Bot:
         horizon = min(8, max(2, math.dist(p[:2], waypoint))) if not live else 10
         if shortcut or elevated:
             horizon = min(8, max(2, goal_dist))
+        incoming_charge = None
+        if not urgent:
+            caster = next((m for m, distance in live if m.get("charging") and distance < 250), None)
+            if caster:
+                ex, ey, ez = caster["pos"]
+                yaw = caster["aim"][0]
+                normal = (-math.sin(yaw), math.cos(yaw))
+                offset = (p[0] - ex) * normal[0] + (p[1] - ey) * normal[1]
+                if abs(offset) < 26:
+                    elapsed = t - self.charge_since[caster["id"]]
+                    remaining = max(0.13, 0.76 - elapsed)
+                    incoming_charge = (ex, ey, ez, normal, offset, remaining)
         for angle in (0, 0.48, -0.48, 0.9, -0.9, 1.55, -1.55, math.pi):
             ax, ay = math.cos(base+angle), math.sin(base+angle)
             room = self.arena.travel_room(p, (ax, ay), horizon, me["stats"])
             score = math.cos(angle)*4 + min(horizon, room)*0.65
             if dangers and room > 2:
                 score = self._dodge_score(score, me, ax, ay, dangers)
+            if incoming_charge and room > 2:
+                ex, ey, ez, normal, offset, remaining = incoming_charge
+                length = min(room, me["stats"]["walk_speed"] * remaining)
+                px, py = p[0] + ax * length, p[1] + ay * length
+                separation = abs(offset + length * (ax * normal[0] + ay * normal[1]))
+                score += 9 * min(1, separation / (me["stats"]["radius"] + 2))
+                if not self.arena.line_open((ex, ey, ez + 7), (px, py, p[2] + 4.5)):
+                    score += 9 * 1.2
             if room < 2:
                 score -= 15
             next_gap = math.hypot(p[0]+ax*8-zone["center"][0], p[1]+ay*8-zone["center"][1])-radius
@@ -560,6 +618,10 @@ class Bot:
         boosting = self.sprinting and me["grounded"] and goal_dist > 12
         if live and not urgent and me["energy"] > 62:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
+        if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
+            boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
+        if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
+            boosting = True
         jumping = False
         if t < self.unstick_until and me["grounded"] and me["energy"] >= me["max_energy"]*0.9:
             jumping = True
@@ -575,6 +637,9 @@ class Bot:
         p = me["pos"]
         self.mech_kills += sum(e["type"] == "kill" and 0 <= e["target"] < 16 for e in obs["events"])
         self.uncredited_eliminations = max(0, 16 - obs["alive"] - self.mech_kills)
+        self.charge_since = {
+            m["id"]: self.charge_since.get(m["id"], t) for m in obs["mechs"] if m.get("charging")
+        }
         self._resources(obs)
         threats, npcs = self._visible_contacts(obs)
         live = [m for m, _, clear in threats if clear]
@@ -611,6 +676,12 @@ class Bot:
         if healing and any(d.get("holder") == me["id"] for d in obs.get("drops", ())):
             healing = False
         state = (*state, healing)
+        if me["weapons"][1] is None:
+            ground_items = tuple(
+                item["id"] for item in obs["pickups"]
+                if item["kind"] in ("laser", "lightning") and abs(item["pos"][2] - p[2]) <= 4
+            )
+            state = (*state, ground_items)
         if healing:
             self.goal, self.mode = tuple(p[:2]), "heal"
             self.plan_state = state
