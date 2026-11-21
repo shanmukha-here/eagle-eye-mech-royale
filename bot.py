@@ -211,25 +211,18 @@ class Bot:
                     score = 86 + min(95, novelty) * 0.23 - distance * 0.06
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
-        # Link an observed floor weapon to the cubes we can collect on the approach.
-        if not urgent and not me["weapons"][1] and len(threats) <= 1:
-            cubes = [p for p,k,seen in self.loot.values() if k == "cube" and obs["t"]-seen < 6]
-            for point, kind, seen in self.loot.values():
-                if kind not in ("laser", "lightning"):
-                    continue
+        # Value an entire nearby pile, including cubes dropped by a defeated rival.
+        if not urgent and len(threats) <= 1:
+            cubes = sorted((p for p, kind, seen in self.loot.values()
+                            if kind == "cube" and obs["t"]-seen < 9),
+                           key=lambda q: math.dist(q,pos))[:18]
+            for point in cubes:
                 cell = self.arena.cell(*point[:2])
-                if cell is None or abs(self.arena.floor[cell]-point[2]) > 4:
+                if cell is None or abs(point[2]-self.arena.floor[cell]) > 4:
                     continue
-                distance = math.dist(pos, point)
-                if distance > 245 or distance < 1:
-                    continue
-                bonus = 287 if kind == "laser" else 275
-                add(*point[:2], kind, bonus, detour=True)
-                for cube in sorted(cubes, key=lambda q:math.dist(q, pos))[:8]:
-                    first = math.dist(pos, cube)
-                    extra = first + math.dist(cube, point) - distance
-                    if first < distance-5 and extra < 10 and abs(cube[2]-pos[2]) < 8:
-                        add(*cube[:2], "supply_route", bonus+6-extra-first*.02, detour=True)
+                count = sum(math.dist(point,q) < 20 for q in cubes)
+                if count >= 2 and math.dist(pos,point) < 140:
+                    add(*point[:2], "salvage", 175 + 22*min(count,5), detour=True)
         if not urgent and me["cubes"] < 12:
             for point, kind, seen in self.loot.values():
                 if kind == "cube" and math.dist(pos,point) < 33 and abs(point[2]-pos[2]) < 5:
@@ -386,6 +379,12 @@ class Bot:
     def _target(self, obs, threats, npcs, urgent):
         me = obs["self"]
         live = [(m, d) for m, d, clear in threats if clear]
+        if live and len(live) == 1:
+            rival, distance = live[0]
+            gun = me["weapons"][0]
+            if (gun and not gun.get("reload_left") and distance < 120
+                    and rival["hp"] <= min(3,gun.get("ammo",0))*gun["stats"]["damage"]):
+                return rival, self._actor_center(rival)
         if self.mode == "heal":
             return None, 0
         if live:
@@ -673,8 +672,6 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
-        if self.mode in ("explore", "supply_route") and not live and goal_dist > 8:
-            boosting = me["grounded"] and me["energy"] > 48 and not self.blocked_count
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
