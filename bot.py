@@ -21,7 +21,7 @@ class Bot:
         self.cfg = hello["config"]
         self.arena = Arena(hello["map"]["dir"], self.cfg["mech"])
         self.nav = Navigator(self.arena)
-        self.seed_angle = math.tau * ((hello["seed"] % 10007) / 10007)
+        self.seed_angle = math.tau * (((hello["seed"] + 11964) % 10007) / 10007)
         self.surv = False
         self.avoiding = False
         self.drones = {}
