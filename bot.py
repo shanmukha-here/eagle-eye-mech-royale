@@ -401,9 +401,6 @@ class Bot:
             if not gun.get("reload", 0) and (ammo == 0 or (target is None and ammo <= gun["stats"]["mag"]*0.72)):
                 act["reload"] = True
         if target is None:
-            # Bank a charged laser while repositioning between observed contacts.
-            if side and side["kind"] == "laser" and not urgent and obs["t"] - self.last_contact < 4:
-                act["fire"] = [False, side.get("charge", 0) > 0 or side["cooldown"] <= 0.1]
             return
         p, q = me["pos"], target["pos"]
         vx, vy, vz = target.get("vel", (0, 0, 0))
@@ -544,6 +541,13 @@ class Bot:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
             if len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
+            if faced and not urgent and 30 < d < 170 and self.damage_window:
+                # Carry lateral velocity through an incoming burst.
+                vx, vy = me["vel"][:2]
+                lateral = -ry * vx + rx * vy
+                if abs(lateral) > 2:
+                    side = 1 if lateral > 0 else -1
+                retreat = max(0.2, min(0.85, retreat))
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
