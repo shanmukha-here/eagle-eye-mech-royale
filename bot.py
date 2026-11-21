@@ -86,43 +86,6 @@ class Bot:
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
 
-    def _arc_engagement(self, obs, threats, urgent):
-        me = obs["self"]
-        weapon = me["weapons"][1]
-        if urgent or not weapon or weapon["kind"] != "lightning":
-            return None
-        live = [(m, dist) for m, dist, visible in threats if visible]
-        if len(live) != 1:
-            return None
-        rival, dist = live[0]
-        reach = weapon["stats"]["range"]
-        if dist > reach + 95 or me["energy"] < 12:
-            return None
-        if me["hp"] < 0.47 * me["max_hp"] and rival["hp"] > me["hp"]:
-            return None
-        pos = me["pos"]
-        ex, ey = rival["pos"][:2]
-        vx, vy = rival["vel"][:2]
-        approach = min(1.4, max(0, dist-reach) / me["stats"]["boost_speed"])
-        ex, ey = ex + vx*approach, ey + vy*approach
-        outward = math.atan2(pos[1]-ey, pos[0]-ex)
-        best = None
-        for offset in (0, -0.52, 0.52, -1.05, 1.05):
-            angle = outward + offset
-            xy = ex + 0.64*reach*math.cos(angle), ey + 0.64*reach*math.sin(angle)
-            c = self.arena.cell(*xy)
-            if c is None or self.arena.clearance[c] < me["stats"]["radius"]+2:
-                continue
-            if math.dist(xy, obs["zone"]["center"]) > obs["zone"]["radius"]-5:
-                continue
-            route_cost = math.dist(pos[:2], xy)
-            if not self.arena.line_open((*xy, self.arena.floor[c]+me["stats"]["muzzle_height"]),
-                                        (*rival["pos"][:2], rival["pos"][2]+self._actor_center(rival))):
-                route_cost += 40
-            if best is None or route_cost < best[0]:
-                best = route_cost, xy
-        return best[1] if best else None
-
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
         pos = me["pos"]
@@ -248,6 +211,17 @@ class Bot:
                     score = 86 + min(95, novelty) * 0.23 - distance * 0.06
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
+        # Before the first contact, an unopened ground crate offers a weapon roll and a cube.
+        if (not urgent and not threats and obs["t"]-self.last_contact > 3
+                and obs["t"] < 105 and me["hp"] >= 0.75*me["max_hp"]
+                and (not me["weapons"][1] or me["cubes"] < 4)):
+            for obj in obs["crates"]:
+                q = obj["pos"]
+                cell = self.arena.cell(*q[:2])
+                if cell is None or abs(q[2]-self.arena.floor[cell]) > 4 or math.dist(pos,q)>165:
+                    continue
+                damage_left = obj["hp"]/max(1,me["weapons"][0]["stats"]["damage"])
+                add(*q[:2], "harvest", 149-2*damage_left, detour=True)
         if not urgent and me["cubes"] < 12:
             for point, kind, seen in self.loot.values():
                 if kind == "cube" and math.dist(pos,point) < 33 and abs(point[2]-pos[2]) < 5:
@@ -420,6 +394,15 @@ class Bot:
                     return drone, self._actor_center(drone)
         if urgent or me["hp"] < me["max_hp"]*0.68 or obs["t"] - self.last_contact < 3:
             return None, 0
+        if self.mode == "harvest":
+            for obj in obs["crates"]:
+                q = obj["pos"]
+                if math.dist(self.goal,q[:2]) > 6:
+                    continue
+                h = self.cfg["crates"]["height"]*0.5
+                if self.arena.line_open((*me["pos"][:2],me["pos"][2]+me["stats"]["muzzle_height"]),
+                                        (*q[:2],q[2]+h)):
+                    return obj,h
         if npcs:
             return npcs[0], self._actor_center(npcs[0])
         for item in sorted(obs["crates"], key=lambda c: math.dist(c["pos"], me["pos"])):
@@ -594,9 +577,6 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
-        if self.mode == "arc" and live:
-            reach = me["weapons"][1]["stats"]["range"]
-            weight = 0.1 if live[0][1] > 0.86 * reach else 1.1
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
@@ -694,8 +674,6 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
-        if self.mode == "arc" and live and not self.blocked_count:
-            boosting = me["grounded"] and live[0][1] > 0.9*me["weapons"][1]["stats"]["range"] and me["energy"] > 21
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
@@ -768,11 +746,6 @@ class Bot:
             self._choose_goal(obs, threats, pressured, urgent)
             self.plan_state = state
             self.plan_at = t + (0.8 if pressured or urgent else 1.4)
-        arc_goal = self._arc_engagement(obs, threats, urgent)
-        if arc_goal is not None:
-            self.goal, self.mode = arc_goal, "arc"
-            self.plan_at = t + 0.15
-            healing = False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
