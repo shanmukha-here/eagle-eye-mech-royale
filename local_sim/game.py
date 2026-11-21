@@ -446,6 +446,8 @@ class Match:
             s["hp"] -= dmg
             q.last_combat = self.t
             q.hit_by = kind
+            if 0 <= src < 16:
+                q.last_hit_by = (src, self.t)
             if s["hp"] <= 0 and q.fatal_weapon is None:
                 q.fatal_weapon, q.fatal_source = kind, src
             q.events.append(

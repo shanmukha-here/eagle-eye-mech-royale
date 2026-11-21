@@ -29,6 +29,9 @@ def roster(mix, strong=False):
 # cast-late, cast-live). Sound reaction is an assumption kept switchable.
 HOUSE_DROPS = True
 HOUSE_SOUND = True
+# Whether a squad member that is not yet hunting shoots back when the subject
+# hits it or comes close. The track page does not say; keep it switchable.
+HOUSE_DEFEND = False
 HEARD_KINDS = ("gun", "laser", "laser_charge", "lightning", "mortar", "explosion", "boost", "reload")
 
 
@@ -59,6 +62,12 @@ def scripted(g, p):
         enemy = min(peers, key=lambda q: math.dist(pos, q.s["pos"]), default=None)
     else:
         enemy = g.players[g.subject] if active and g.t - g.team_seen < 5 else None
+        if HOUSE_DEFEND and enemy is None and g.players[g.subject].life:
+            hit = getattr(p, "last_hit_by", None)
+            subject = g.players[g.subject]
+            if (hit and hit[0] == g.subject and g.t - hit[1] < 6) or (
+                    math.dist(pos, subject.s["pos"]) < 60 and g.visible(p, subject.s["pos"], 9)):
+                enemy = subject
     zone = g.zone
     dest = zone["next_center"]
     gun = s["weapons"][0]
