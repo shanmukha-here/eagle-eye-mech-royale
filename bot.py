@@ -53,6 +53,8 @@ class Bot:
         self.next_screen = 0
         self.first_contact = None
         self.firing_window = 0
+        self.circuit_side = 1
+        self.circuit_until = -1
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -97,80 +99,6 @@ class Bot:
             return self.cfg["npc"]["height"] * 0.5
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
-
-    def _incoming_step(self, obs, move, boost, jump):
-        """Compare game input commands against visible rounds for the next six observations."""
-        me = obs["self"]
-        pos = me["pos"]
-        stats = me["stats"]
-        if not me["grounded"] or self.mode in ("drop", "heal") or jump:
-            return move, boost, jump
-        incoming = []
-        for shot in obs["projectiles"]:
-            if shot["kind"] not in ("gun", "npc"):
-                continue
-            q = shot["pos"]
-            vx, vy, vz = shot["vel"]
-            dx, dy = pos[0]-q[0], pos[1]-q[1]
-            rvx, rvy = vx-me["vel"][0], vy-me["vel"][1]
-            speed2 = rvx*rvx + rvy*rvy
-            tau = (dx*rvx + dy*rvy)/max(1, speed2)
-            if 0.055 < tau < 0.65 and math.hypot(dx-rvx*tau, dy-rvy*tau) < stats["radius"]+6:
-                z = q[2]+vz*tau - pos[2]
-                if -2 < z < stats["height"]+3:
-                    incoming.append((tau, q, shot["vel"]))
-        if not incoming:
-            return move, boost, jump
-        incoming.sort(key=lambda x:x[0])
-        incoming = incoming[:3]
-        bx, by = direction(*incoming[0][2][:2])
-        choices = [(move, boost, False), ((-by, bx), False, False), ((by, -bx), False, False)]
-        if me["energy"] > 20:
-            choices.extend([((-by, bx), True, False), ((by, -bx), True, False)])
-        choices.append((move, False, True))
-        origin_cell = self.arena.cell(*pos[:2])
-        if origin_cell is None:
-            return move, boost, jump
-        best = -math.inf
-        selected = choices[0]
-        last = incoming[-1][0] + 0.055
-        for heading, sprint, hop in choices:
-            speed = stats["boost_speed"] if sprint else stats["walk_speed"]
-            if any(w and w.get("charge",0)>0 for w in me["weapons"]):
-                speed *= stats["charge_move_mult"]
-            tx, ty = speed*heading[0], speed*heading[1]
-            x,y,z = pos
-            vx,vy = me["vel"][:2]
-            vz = stats["jump_speed"] if hop else 0
-            closest = [100.0]*len(incoming)
-            room = self.arena.travel_room(pos, heading, last*speed, stats)
-            accel = stats["air_accel"] if hop else stats["ground_accel"]
-            for i in range(1, math.ceil(last/0.05)+1):
-                t = i*0.05
-                f = min(1, accel*0.05/max(0.001,math.hypot(tx-vx,ty-vy)))
-                vx += f*(tx-vx)
-                vy += f*(ty-vy)
-                if math.hypot(x+vx*.05-pos[0], y+vy*.05-pos[1]) <= room+0.25:
-                    x += vx*.05
-                    y += vy*.05
-                z = max(pos[2], z + vz*.05)
-                vz -= stats["gravity"]*.05
-                for j,(tau,q,v) in enumerate(incoming):
-                    if abs(tau-t) > 0.07:
-                        continue
-                    # Check the closest point in the tick, including fast rounds
-                    # which travel farther than the mech's width in one physics step.
-                    dx,dy = x-q[0]-v[0]*t,y-q[1]-v[1]*t
-                    fx,fy = v[0]-vx,v[1]-vy
-                    dt = max(-.025,min(.025,(dx*fx+dy*fy)/max(1,fx*fx+fy*fy)))
-                    height = q[2] + v[2]*(t+dt)-z
-                    side = math.hypot(dx-fx*dt,dy-fy*dt)-stats["radius"]
-                    closest[j] = min(closest[j],max(side,-height,height-stats["height"]))
-            score = sum(min(3,d) - 2.5*(d<0) for d in closest)
-            score += 0.65*(heading[0]*move[0]+heading[1]*move[1])-0.3*sprint-0.9*hop
-            if score > best:
-                best,selected=score,(heading,sprint,hop)
-        return selected
 
     def _screen(self, obs, enemy):
         me = obs["self"]
@@ -696,6 +624,24 @@ class Bot:
             weight = 0.12
         if self.mode == "standoff":
             weight = 0.23
+        if len(live) == 1 and not urgent and not self.blocked_count:
+            rival, dist = live[0]
+            if 32 < dist < 145 and (self.damage_window or self.mode in ("heal", "cover")):
+                rx, ry = direction(p[0]-rival["pos"][0], p[1]-rival["pos"][1])
+                if t >= self.circuit_until:
+                    def lane(sign):
+                        lateral = -ry*sign, rx*sign
+                        room = self.arena.travel_room(p, lateral, 24, me["stats"])
+                        point = p[0]+lateral[0]*room, p[1]+lateral[1]*room
+                        c = self.arena.cell(*point)
+                        cover = (c is not None and not self.arena.line_open(
+                            (*rival["pos"][:2], rival["pos"][2]+7),
+                            (*point,self.arena.floor[c]+me["stats"]["muzzle_height"])))
+                        return room + 17*cover + 0.5*(me["vel"][0]*lateral[0]+me["vel"][1]*lateral[1])
+                    self.circuit_side = max((-1, 1), key=lane)
+                    self.circuit_until = t + 1.15
+                evade = direction(-ry*self.circuit_side + 0.18*rx, rx*self.circuit_side + 0.18*ry)
+                weight = 3.5
         if self.mode == "screen":
             weight = 0.12
             if goal_dist < 2:
@@ -910,8 +856,6 @@ class Bot:
             move, boost, jump = (0, 0), False, False
         else:
             move, boost, jump = self._move(obs, threats, urgent, pressured)
-        if not urgent:
-            move, boost, jump = self._incoming_step(obs, move, boost, jump)
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
