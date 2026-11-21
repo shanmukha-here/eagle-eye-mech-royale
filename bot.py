@@ -151,6 +151,18 @@ class Bot:
         t, me = obs["t"], obs["self"]
         if threats:
             self.hunter = (threats[0][0], t)
+        if not self.hunter and not urgent and t < 65:
+            # Stage at a nearby wall before an opponent appears.
+            node = self.arena.nearest(me["pos"])
+            if node is not None:
+                choices = [(self.arena.clearance[self.arena.cells[k]],
+                            math.dist(me["pos"][:2], self.arena.points[k]), self.arena.points[k])
+                           for k, room in self.arena.links[node]
+                           if math.dist(self.arena.points[k], obs["zone"]["next_center"]) <= obs["zone"]["next_radius"]]
+                if choices and (me["weapons"][1] or self.mode not in ("laser", "lightning")):
+                    clearance, dist, xy = min(choices)
+                    if clearance < 24:
+                        return xy, "ambush"
         if not self.hunter or urgent:
             return None
         rival, seen = self.hunter
@@ -167,14 +179,14 @@ class Bot:
             return None
         hidden, peek = self.shelter
         if not armed:
-            return hidden, "withdraw"
+            return hidden, "ambush"
         exposed = any(clear for _, _, clear in threats)
         if rival.get("hp", 1500) < 0.32 * me["max_hp"] and exposed:
             return None
         if self.peek_until and t >= self.peek_until:
             self.peek_until = 0
-            self.hide_until = t + 1.8
-        if math.dist(me["pos"][:2], hidden) < 8 and t >= self.hide_until and not self.peek_until:
+            self.hide_until = t + 4.2
+        if math.dist(me["pos"][:2], hidden) < 10 and t >= self.hide_until and not self.peek_until:
             self.peek_until = t + min(4.5, math.dist(hidden, peek) / me["stats"]["walk_speed"] + 1.2)
         return (peek, "peek") if self.peek_until else (hidden, "withdraw")
 
@@ -659,7 +671,7 @@ class Bot:
                     if goal_dist > d["radius"]*0.45:
                         return direct, False, False
                     return (0, 0), False, False
-        if self.mode in ("peek", "withdraw"):
+        if self.mode in ("peek", "withdraw", "ambush"):
             weight = 0.08
             if goal_dist < 3:
                 return (0, 0), False, False
