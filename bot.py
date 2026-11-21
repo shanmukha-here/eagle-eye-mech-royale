@@ -48,9 +48,8 @@ class Bot:
         self.unstick_until = -1
         self.rescue_until = -1
         self.blocked_count = 0
-        self.cover_key = self.cover_point = None
-        self.cover_refresh = -1
-        self.loading_until = -1
+        self.reserve_until=-1
+        self.saved_shot=False
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -121,48 +120,6 @@ class Bot:
             if best is None or score < best[0]:
                 best = score, drop
         return best[1] if best else None
-
-    def _duel_cover(self, obs, rivals, mode, finish=None, relocate=False):
-        me, zone = obs["self"], obs["zone"]
-        pos = me["pos"]
-        key = (mode, tuple(m["id"] for m in rivals), finish["id"] if finish else None)
-        if self.cover_key == key and obs["t"] < self.cover_refresh:
-            return self.cover_point
-        self.cover_key = key
-        self.cover_refresh = obs["t"] + 0.8
-        eyes = [(*m["pos"][:2], m["pos"][2]+self._actor_center(m)*1.5) for m in rivals[:3]]
-        if not eyes:
-            # Score the approach indicated by recent fire and the two adjoining sectors.
-            for angle in (self.last_bearing, self.last_bearing-1.2, self.last_bearing+1.2):
-                xy = pos[0]+60*math.cos(angle), pos[1]+60*math.sin(angle)
-                cell = self.arena.cell(*xy)
-                if cell is not None:
-                    eyes.append((*xy,self.arena.floor[cell]+me["stats"]["muzzle_height"]))
-        best = None
-        for radius, count in ((0,1),(12,8),(28,8),(48,8)):
-            for i in range(count):
-                angle = self.last_bearing + math.tau*i/count
-                xy = pos[0]+radius*math.cos(angle), pos[1]+radius*math.sin(angle)
-                cell = self.arena.cell(*xy)
-                if cell is None or self.arena.clearance[cell] < me["stats"]["radius"]+1.8:
-                    continue
-                if math.dist(xy,zone["center"]) > zone["radius"]-4:
-                    continue
-                dest = (*xy,self.arena.floor[cell]+me["stats"]["muzzle_height"])
-                blocked = sum(not self.arena.line_open(eye,dest) for eye in eyes)
-                score = 48*blocked / max(1,len(eyes)) - 0.38*radius
-                if relocate:
-                    score += min(22,radius)*0.9
-                if rivals:
-                    score += min(25,math.dist(xy,rivals[0]["pos"][:2])-math.dist(pos[:2],rivals[0]["pos"][:2]))*.35
-                if finish:
-                    q=finish["pos"]
-                    score += 16*self.arena.line_open(dest,(*q[:2],q[2]+self._actor_center(finish)))
-                score -= 0.6*max(0,math.dist(xy,zone["next_center"])-zone["next_radius"])
-                if best is None or score>best[0]:
-                    best=score,xy
-        self.cover_point = best[1] if best else tuple(pos[:2])
-        return self.cover_point
 
     def _choose_goal(self, obs, threats, pressured, urgent):
         me, zone = obs["self"], obs["zone"]
@@ -635,8 +592,6 @@ class Bot:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
-        if self.mode == "magazine":
-            weight = 0.12
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
@@ -734,8 +689,6 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
-        if self.mode == "magazine" and not self.blocked_count:
-            boosting = goal_dist > 7 and me["grounded"] and me["energy"] > 28
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
@@ -813,20 +766,6 @@ class Bot:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
             self.plan_at = t
             healing = False
-        gun=me["weapons"][0]
-        needs_load=gun["ammo"] <= max(3,round(gun["stats"]["mag"]*.30))
-        # A partially spent magazine is also worth refilling in the gap after an elimination.
-        just_killed=any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"])
-        if not urgent and ((needs_load and (live or t-self.last_contact<3)) or
-                (just_killed and gun["ammo"] < gun["stats"]["mag"]*.8)):
-            self.loading_until=max(self.loading_until,t+min(.7,gun["stats"]["reload"]))
-        loading=drop is None and not urgent and gun["ammo"]<gun["stats"]["mag"] and (
-            t<self.loading_until or (gun["reload"]>0 and t-self.last_contact<4))
-        if loading:
-            self.goal=self._duel_cover(obs,[m for m,_,_ in threats],"magazine")
-            self.mode="magazine"
-            self.plan_at=t
-            healing=False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -860,11 +799,34 @@ class Bot:
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
         self._weapons(obs, target, center, act, urgent)
-        if loading:
-            if gun["reload"]<=0:
-                act["reload"]=True
+        gun,side=me["weapons"]
+        if side and side["kind"]=="laser" and not urgent:
+            foe=target and target.get("kind")=="mech"
+            gun_power=gun["stats"]["damage"]*(1+self.cfg["cubes"]["damage_per_cube"]*min(me["cubes"],self.cfg["cubes"]["stat_cap"]))
+            cheap=foe and gun["ammo"]>=2 and not gun["reload"] and target["hp"]<1.65*gun_power
+            kill=any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"])
+            if kill:
+                self.reserve_until=t+2.0
+                self.saved_shot=False
             fire=act.get("fire",[False,False])
-            act["fire"]=[False,fire[1]]
+            if cheap and side["charge"]==0:
+                act["fire"]=[fire[0],False]
+            elif t<self.reserve_until and not self.saved_shot and side["cooldown"]<=0.1:
+                if not foe:
+                    if side["charge"]<side["stats"]["charge"]+0.55:
+                        act["fire"]=[False,True]
+                    else:
+                        self.saved_shot=True
+                elif side["charge"]>0:
+                    q=target["pos"]
+                    yaw=math.atan2(q[1]-p[1],q[0]-p[0])
+                    aligned=abs(angle_delta(yaw,me["aim"][0]))<.085
+                    if aligned and side["charge"]>=side["stats"]["charge"]*.8:
+                        self.saved_shot=True
+                        act["aim"]=[yaw,math.atan2(q[2]+center-p[2]-me["stats"]["muzzle_height"],math.dist(q[:2],p[:2]))]
+                        act["fire"]=[fire[0],False]
+                    else:
+                        act["fire"]=[fire[0],True]
         return act
 
 
