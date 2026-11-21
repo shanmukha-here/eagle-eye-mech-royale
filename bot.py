@@ -824,7 +824,12 @@ class Bot(PlacementBot):
                         (rise/me["stats"]["max_rise_speed"]+.7)*me["stats"]["jet_drain"]+18 < me["energy"]):
                         near=a.nearest((x,y),room=me["stats"]["radius"]+2)
                         if near is not None and math.dist(a.points[near],(x,y))<12:
-                            choices.append((4+rise*.25-.18*math.hypot(dx,dy),x,y,"roof"))
+                            center_cell=a.cell(cx,cy)
+                            outlook=bool(center_cell is not None and a.line_open(
+                                (x,y,a.top[c]+6),(cx,cy,a.floor[center_cell]+6)))
+                            if outlook:
+                                held=abs(rise)<.5 and math.hypot(dx,dy)<3
+                                choices.append((9+9*held+rise*.25-.18*math.hypot(dx,dy),x,y,"roof"))
         if not choices:
             return (cx,cy),"zone"
         _,x,y,mode=max(choices)
