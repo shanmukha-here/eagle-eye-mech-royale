@@ -16,6 +16,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 
 from local_sim.game import Match
@@ -75,6 +76,8 @@ def prepare(args):
     HELLO["map"]["dir"] = str(kit / "arena")
     cache = args.cache.resolve()
     cache.mkdir(parents=True, exist_ok=True)
+    # Keep per-match diagnostics on the chosen evaluation disk.
+    tempfile.tempdir = str(cache)
 
     def digest(files):
         d = hashlib.sha256()
