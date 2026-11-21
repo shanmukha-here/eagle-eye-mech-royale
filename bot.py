@@ -265,20 +265,6 @@ class Bot:
                 add(px+dx*spacing,py+dy*spacing,"duel",bonus,detour=True)
         if not urgent and radius >= 40 and self.uncredited_eliminations >= 1:
             goals.extend(self._perimeter_goals(obs, threats))
-        if (not urgent and me["weapons"][1] and radius >= 50
-                and obs["t"] > 12):
-            # Put the active ring between the pursuer and our fallback route.
-            heading = math.atan2(y-cy, x-cx)
-            for offset in (0, -0.32, 0.32, -0.65, 0.65, -1.0, 1.0):
-                a = heading + offset
-                px = cx + math.cos(a) * (radius - 15)
-                py = cy + math.sin(a) * (radius - 15)
-                if math.dist((px, py), zone["center"]) > zone["radius"]-7:
-                    continue
-                bonus = 142
-                if threats:
-                    bonus += min(42, math.dist((px, py), closest[:2]) * 0.24)
-                add(px, py, "rim", bonus)
         if goals:
             _, gx, gy, self.mode = max(goals)
             self.goal = (gx, gy)
@@ -416,6 +402,8 @@ class Bot:
             if not gun.get("reload", 0) and (ammo == 0 or (target is None and ammo <= gun["stats"]["mag"]*0.72)):
                 act["reload"] = True
         if target is None:
+            if side and side["kind"] == "laser" and not urgent and obs["t"] - self.last_contact < 4:
+                act["fire"] = [False, side.get("charge", 0) > 0 or side["cooldown"] <= 0.1]
             return
         p, q = me["pos"], target["pos"]
         vx, vy, vz = target.get("vel", (0, 0, 0))
@@ -567,8 +555,6 @@ class Bot:
                 weight = 0.23
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and not urgent:
             weight = 0.12
-        if self.mode == "rim" and not urgent:
-            weight = 0.2 if goal_dist > 9 else 1.2
         if self.mode == "skirt" and goal_dist > 9 and not urgent:
             weight = 0.38 if not pressured else 0.62
         if self.mode=="duel" and not urgent and not pressured:
