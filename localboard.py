@@ -3,6 +3,7 @@
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+import fcntl
 import gzip
 import hashlib
 import inspect
@@ -350,6 +351,21 @@ def run_match(job):
     return row
 
 
+def shared_match(job):
+    """Share one timed outcome when two evaluations request the same cold seed."""
+    seed, name, mix, field, _ = job
+    folder = OUT / field / str(mix)
+    key = HASHES[name]
+    result = folder / f"{key}-{seed}.json"
+    if result.exists():
+        return json.loads(result.read_text())
+    # Fixed buckets bound the number of lock files in long-running studies.
+    bucket = (seed + int(key[:6], 16)) % 4096
+    with (folder / f".match-{bucket}.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return run_match(job)  # Rechecks the cache after acquiring the lock.
+
+
 def interval(values):
     mean = statistics.mean(values)
     # Round the degrees of freedom down for a conservative two-sided
@@ -478,7 +494,7 @@ def main():
                 for name in args.models:
                     if HASHES[name] not in jobs:
                         jobs[HASHES[name]] = [
-                            pool.submit(run_match, (first + i, name, args.mix, pool_name, args.docker))
+                            pool.submit(shared_match, (first + i, name, args.mix, pool_name, args.docker))
                             for i in range(n)
                         ]
                 groups = {name: [f.result() for f in jobs[HASHES[name]]] for name in args.models}
