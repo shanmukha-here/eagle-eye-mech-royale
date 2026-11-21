@@ -95,7 +95,7 @@ class Bot:
         if urgent or not me["in_zone"]:
             return None
         health = me["hp"]/me["max_hp"]
-        if health >= 0.75:
+        if health > 0.75 and (me["cubes"] >= 3 or obs["t"] > 125):
             return None
         speed = max(1, me["stats"]["walk_speed"])
         best = None
@@ -107,7 +107,14 @@ class Bot:
             if cell is None or abs(drop["pos"][2]-self.arena.floor[cell]) > 5:
                 continue
             distance = math.dist(me["pos"][:2],point)
-            eta = max(0,distance-drop["radius"]*.5)*1.25 / speed
+            ground = max(0,distance-drop["radius"]*.5)*1.25
+            eta = ground / speed
+            if health < 0.7 and me["grounded"] and me["energy"] > 48 and distance < 115:
+                # Count a brief initial boost, leaving enough energy to escape a bad ring.
+                sprint_time = min(2.2, (me["energy"]-36)/me["stats"]["boost_drain"])
+                boost_gain = max(0, me["stats"]["boost_speed"]-speed)*sprint_time
+                eta = max(0, ground-boost_gain)/speed
+
             finish = max(eta,drop["lands_in"])+drop["capture_s"]-drop["progress"]
             if finish > (24 if health < 0.7 else 16):
                 continue
