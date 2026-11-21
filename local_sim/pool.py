@@ -110,7 +110,17 @@ def scripted(g, p):
             a["reload"] = gun.get("ammo", 12) < 8
         if role == "camper" and math.dist(pos[:2], dest[:2]) < zone["next_radius"] * 0.6:
             mx = my = 0
-    a.update(move=[mx, my], aim=[yaw, pitch], boost=not s["in_zone"] and s["grounded"], jump=False)
+    # Expert fillers fired from inside the zone while boosting in both public
+    # exhibitions. Use short combat pulses without assuming their private input.
+    combat_pulse = (
+        not g.ffa and target is not None and enemy is not None
+        and s["energy"] > 28 and (g.tick // 2 + p.id) % 5 in (0, 2)
+        and role not in ("looter", "camper")
+    )
+    a.update(
+        move=[mx, my], aim=[yaw, pitch],
+        boost=s["grounded"] and (not s["in_zone"] or combat_pulse), jump=False,
+    )
     if mx or my:
         arena = g.geo.arena
         cell = arena.cell(pos[0] + mx * 4, pos[1] + my * 4)
