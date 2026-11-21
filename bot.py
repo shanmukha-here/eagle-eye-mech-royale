@@ -764,25 +764,6 @@ class Bot:
             self.goal, self.mode = tuple(drop["pos"][:2]), "drop"
             self.plan_at = t
             healing = False
-        # An isolated kill can leave enough cubes to restore HP before the next rival arrives.
-        if (drop is None and not urgent and hp_fraction < 0.73 and not live
-                and any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"])):
-            close_cubes=[c for c in obs["cubes"] if math.dist(c["pos"],p)<19
-                         and abs(c["pos"][2]-p[2])<4]
-            for cube in sorted(close_cubes,key=lambda c:math.dist(c["pos"],p)):
-                xy=tuple(cube["pos"][:2])
-                cell=self.arena.cell(*xy)
-                if cell is None or self.arena.clearance[cell]<me["stats"]["radius"]+1.8:
-                    continue
-                if math.dist(xy,zone["next_center"])>=zone["next_radius"]-4:
-                    continue
-                if any(math.dist(xy,m["pos"][:2])<32 for m,_,_ in threats):
-                    continue
-                self.goal,self.mode=xy,"cube"
-                self.plan_at=t+0.45
-                self.recover_until=min(self.recover_until,t+0.35)
-                healing=False
-                break
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -802,6 +783,10 @@ class Bot:
                 move, boost, jump = (0, 0), False, False
             elif distance > 12 and not self.blocked_count and me["grounded"] and me["energy"] > 32:
                 boost = True
+        # Enter the ring on foot. Jetting over its boundary consumes part of the capture window.
+        if drop is not None and 4.5 < math.dist(p[:2],drop["pos"][:2]) < 15:
+            if not self.blocked_count and math.hypot(*me["vel"][:2]) > 0.4:
+                boost,jump=False,False
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
