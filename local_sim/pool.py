@@ -25,6 +25,30 @@ def roster(mix, strong=False):
     ]
 
 
+# Real house fillers captured supply drops in the public exhibitions (p2-house,
+# cast-late, cast-live). Sound reaction is an assumption kept switchable.
+HOUSE_DROPS = True
+HOUSE_SOUND = True
+HEARD_KINDS = ("gun", "laser", "laser_charge", "lightning", "mortar", "explosion", "boost", "reload")
+
+
+def hear(g, p):
+    """Remember a noisy estimate of the latest audible rival sound."""
+    pos = p.s["pos"]
+    ranges = g.cfg["sound"]["range"]
+    for kind, by, point, when in g.sounds:
+        if by == p.id or by >= 16 or g.t - when > 0.101 or kind not in HEARD_KINDS:
+            continue
+        if not g.ffa and by != g.subject:
+            continue
+        d = math.dist(point, pos)
+        if d > ranges.get(kind, 0):
+            continue
+        bearing = math.atan2(point[1] - pos[1], point[0] - pos[0]) + p.rng.gauss(0, 0.12)
+        d *= 0.8 + 0.4 * p.rng.random()
+        p.heard = ((pos[0] + d * math.cos(bearing), pos[1] + d * math.sin(bearing)), g.t)
+
+
 def scripted(g, p):
     s = p.s
     pos = s["pos"]
@@ -52,6 +76,10 @@ def scripted(g, p):
             dest = pt
     elif active and not g.ffa and g.shared_pos is not None and g.t - g.team_seen < 16:
         dest = g.shared_pos
+    elif HOUSE_SOUND and active and getattr(p, "heard", None) and g.t - p.heard[1] < 8:
+        dest = p.heard[0]
+    if HOUSE_SOUND and active and enemy is None:
+        hear(g, p)
     # Scripted policies check nearby loot periodically and keep their waypoint.
     if g.tick % 12 < 2 or not hasattr(p, "resource"):
         best = 65 if role == "looter" else 30
@@ -75,13 +103,21 @@ def scripted(g, p):
             a["take"] = item
         if item in g.crates:
             target = pt
-    if role == "edge" and enemy is None and not p.resource:
+    holding = False
+    if HOUSE_DROPS and enemy is None:
+        for d in g.drops.values():
+            far = math.dist(pos[:2], d["pos"][:2])
+            if far < 300 and d["lands_in"] <= far / 11.7 + 3 and d["holder"] in (None, p.id):
+                dest = d["pos"]
+                holding = far < d["radius"] * 0.6
+                break
+    if role == "edge" and enemy is None and not p.resource and not holding:
         theta = p.id * 2.399
         dest = [
             dest[0] + zone["next_radius"] * 0.54 * math.cos(theta),
             dest[1] + zone["next_radius"] * 0.54 * math.sin(theta),
         ]
-    mx, my = unit(dest[0] - pos[0], dest[1] - pos[1])
+    mx, my = (0, 0) if holding else unit(dest[0] - pos[0], dest[1] - pos[1])
     if target is not None:
         dx, dy = target[0] - pos[0], target[1] - pos[1]
         d = math.hypot(dx, dy)

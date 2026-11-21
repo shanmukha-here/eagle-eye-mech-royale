@@ -347,6 +347,7 @@ def run_match(job):
         "kills": subject.kills,
         "cubes": subject.s["cubes"],
         "drops": subject.drops,
+        "house_drops": sum(p.drops for p in g.players if p is not subject),
         "cause": subject.fatal_weapon or ("win" if place == 1 else "clock"),
         "killer": subject.fatal_source,
         "killer_role": (
