@@ -53,8 +53,9 @@ class Bot:
         self.next_screen = 0
         self.first_contact = None
         self.firing_window = 0
-        self.reset_until = self.reset_plan_at = -1
-        self.reset_goal = None
+        self.handoff_until = -1
+        self.handoff_contact = None
+        self.handoff_yaw = 0
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -136,64 +137,6 @@ class Bot:
             if best is None or route_cost < best[0]:
                 best = route_cost, xy
         return best[1] if best else None
-
-    def _reset_after_kill(self, obs, threats, urgent):
-        me, t = obs["self"], obs["t"]
-        if any(e["type"] == "kill" and 0 <= e["target"] < 16 for e in obs["events"]):
-            self.reset_until = t + 5.5 + (me["max_hp"]-me["hp"])/max(1,me["stats"]["regen_per_s"])
-            self.reset_goal = None
-            self.reset_plan_at = -1
-        if (urgent or t >= self.reset_until or me["hp"] >= 0.95*me["max_hp"]):
-            self.reset_until = -1
-            return None
-        if threats and threats[0][2] and threats[0][1] < 55 and threats[0][0]["hp"] < 0.7*me["hp"]:
-            return None
-        if self.reset_goal and t < self.reset_plan_at:
-            return self.reset_goal
-        self.reset_plan_at = t + 1.2
-        pos, arena, zone = me["pos"], self.arena, obs["zone"]
-        start = arena.nearest(pos)
-        if start is None:
-            return None
-        sources = [(*m["pos"][:2],m["pos"][2]+self._actor_center(m)*1.55) for m,_,_ in threats[:2]]
-        if not sources:
-            # During the gap between opponents, test shelter from the inner circle.
-            nx,ny = zone["next_center"]
-            dx,dy = direction(nx-pos[0],ny-pos[1])
-            for sign in (-1,1):
-                x,y = pos[0]+85*dx+sign*45*dy,pos[1]+85*dy-sign*45*dx
-                cell = arena.cell(x,y)
-                if cell is not None:
-                    sources.append((x,y,arena.floor[cell]+7))
-        if not any(clear and distance < 85 for _, distance, clear in threats):
-            loot = [xy for xy,kind,seen in self.loot.values()
-                    if kind in ("cube","laser","lightning") and abs(xy[2]-pos[2]) < 4
-                    and (kind == "cube" or not me["weapons"][1])
-                    and math.dist(pos,xy)<35 and t-seen < 5]
-            if loot:
-                self.reset_goal = tuple(min(loot,key=lambda xy: math.dist(pos,xy))[:2])
-                return self.reset_goal
-        candidates = []
-        for row in (-7,-4,-2,0,2,4,7):
-            for col in (-7,-4,-2,0,2,4,7):
-                gx,gy=start%arena.gw+col,start//arena.gw+row
-                if not (0<=gx<arena.gw and 0<=gy<arena.gh):
-                    continue
-                n=gy*arena.gw+gx
-                c=arena.cells[n]
-                if arena.components[n]!=arena.components[start] or arena.clearance[c]<me["stats"]["radius"]+2:
-                    continue
-                xy=arena.points[n]
-                if math.dist(xy,zone["center"])>zone["radius"]-9:
-                    continue
-                height=(*xy,arena.floor[c]+me["stats"]["muzzle_height"])
-                visible=sum(arena.line_open(origin,height) for origin in sources)
-                score=55*visible+0.4*math.dist(pos[:2],xy)+0.3*min(40,arena.clearance[c])
-                if self.reset_goal:
-                    score+=0.3*min(16,math.dist(self.reset_goal,xy))
-                candidates.append((score,xy))
-        self.reset_goal=min(candidates)[1] if candidates else None
-        return self.reset_goal
 
     def _screen(self, obs, enemy):
         me = obs["self"]
@@ -585,6 +528,12 @@ class Bot:
                     vx += max(-28, min(28, (vx - old_vx) / elapsed)) * horizon * 0.52
                     vy += max(-28, min(28, (vy - old_vy) / elapsed)) * horizon * 0.52
             self.previous_target = (target["id"], obs["t"], *target["vel"][:2])
+        if laser and charge > 0 and target.get("kind") == "mech":
+            stats = side["stats"]
+            fraction = stats["min_frac"] + (1-stats["min_frac"])*min(1,charge/stats["charge"])
+            power = stats["damage"]*(1+self.cfg["cubes"]["damage_per_cube"]*min(me["cubes"],self.cfg["cubes"]["stat_cap"]))
+            if target["hp"] < power*fraction*0.75:
+                laser_due = True
         if laser_due:
             seconds = 0
         point = (q[0]+vx*seconds, q[1]+vy*seconds, q[2]+center+vz*seconds)
@@ -727,10 +676,8 @@ class Bot:
             sign = 1 if me["vel"][1]*rx - me["vel"][0]*ry >= 0 else -1
             evade = -ry*sign, rx*sign
             weight = 2.0
-        if self.mode == "reset":
-            weight = 0.12
-            if goal_dist < 3 and not live:
-                return (0,0), False, False
+        if self.mode == "handoff":
+            weight = 0.2
         if self.mode == "screen":
             weight = 0.12
             if goal_dist < 2:
@@ -956,12 +903,40 @@ class Bot:
                 self.plan_at = t
                 healing = False
                 tactical = False
-        reset_point = self._reset_after_kill(obs, threats, urgent)
-        if reset_point is not None:
-            self.goal,self.mode = reset_point,"reset"
-            self.plan_at=t
-            healing=False
-            tactical=False
+        weak = [m for m in live if m["hp"] < 0.31 * self.cfg["mech"]["hp"]]
+        if weak:
+            # Prepare a fallback from the next observed opponent before the elimination.
+            dying = min(weak,key=lambda m:m["hp"])
+            others = [m for m,_,_ in threats if m["id"] != dying["id"]]
+            if others:
+                self.handoff_contact = tuple(others[0]["pos"])
+                self.handoff_yaw = math.atan2(others[0]["pos"][1]-p[1],others[0]["pos"][0]-p[0])
+            self.handoff_until = t + 3.5
+        if any(e["type"]=="kill" and 0<=e["target"]<16 for e in obs["events"]):
+            self.handoff_until = t + 4.5
+            if self.handoff_contact is None:
+                self.handoff_yaw = self.last_bearing
+        if t >= self.handoff_until:
+            self.handoff_contact = None
+        transitioning = t < self.handoff_until and not urgent
+        if transitioning and self.handoff_contact and len(live) <= 2:
+            nx,ny,nz = self.handoff_contact
+            away=math.atan2(p[1]-ny,p[0]-nx)
+            choices=[]
+            for offset in (0, -0.7, 0.7, -1.4, 1.4):
+                dx,dy=math.cos(away+offset),math.sin(away+offset)
+                room=self.arena.travel_room(p,(dx,dy),19,me["stats"])
+                xy=p[0]+room*dx,p[1]+room*dy
+                cell=self.arena.cell(*xy)
+                if room<6 or cell is None or math.dist(xy,zone["center"])>zone["radius"]-6:
+                    continue
+                exposed=self.arena.line_open((nx,ny,nz+7),(*xy,self.arena.floor[cell]+me["stats"]["muzzle_height"]))
+                choices.append((room+15*(not exposed),xy))
+            if choices:
+                self.goal,self.mode=max(choices)[1],"handoff"
+                self.plan_at=t
+                tactical=False
+                healing=False
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
@@ -990,11 +965,13 @@ class Bot:
         act["aim"] = [angle_delta(yaw, 0), 0]
         if tactical and not armed and math.dist(self.goal, p[:2]) > 5 and target and target.get("hp", 1400) > 180:
             target = None
-        if reset_point is not None and (not live or target is None or target.get("kind") != "mech"):
+        if transitioning and target and target.get("kind") != "mech":
             target = None
+        if transitioning and target is None and self.handoff_contact:
+            act["aim"] = [self.handoff_yaw, 0]
         self._weapons(obs, target, center, act, urgent)
-        if reset_point is not None and target is None:
-            act["fire"] = [False, False]
+        if transitioning and me["weapons"][0]["ammo"] >= 4:
+            act.pop("reload", None)
         return act
 
 
