@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent
 REFS = {
     "phase1": "f4e346ad250f0ca69a4803e760e2ab482f2f4cd6",
     "phase2": "30cd61654c5d03c2a3131448259c9b4603796fd5",
+    "phase4": "55f14e7eeec28838eed4537948317dc8c385d893",
     "phase3": "c9901fa16f407aa222df52c184f858466bda13a4",
 }
 OPPONENT_REVISIONS = {
@@ -43,6 +44,9 @@ SPLITS = {
     "p4dev": (1200000, 96),
     "p4verify": (1300000, 200),
     "p4test": (1400000, 320),
+    "p5dev": (1500000, 96),
+    "p5verify": (1600000, 200),
+    "p5test": (1700000, 320),
 }
 DEFAULT_MIX = 3
 
@@ -333,12 +337,12 @@ def main():
     ap.add_argument("--split", choices=[*SPLITS, "all"], default="all")
     ap.add_argument(
         "--test-split",
-        choices=("holdout", "confirm", "p4test"),
-        default="p4test",
+        choices=("holdout", "confirm", "p4test", "p5test"),
+        default="p5test",
         help="test block for --split all",
     )
     ap.add_argument("--matches", type=int, help="smoke/pilot override per split")
-    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["phase3", "candidate"])
+    ap.add_argument("--models", nargs="+", choices=[*REFS, "candidate"], default=["phase4", "candidate"])
     ap.add_argument("--mix", type=int, choices=range(5), default=DEFAULT_MIX)
     ap.add_argument("--workers", type=int, help="default: 6 in Docker, 48 native")
     ap.add_argument(
@@ -409,7 +413,7 @@ def main():
             initargs=(cpus,),
         ) as pool:
             for split in (
-                ("p4dev" if args.test_split == "p4test" else "dev", args.test_split)
+                ({"p5test": "p5dev", "p4test": "p4dev"}.get(args.test_split, "dev"), args.test_split)
                 if args.split == "all"
                 else [args.split]
             ):
@@ -437,7 +441,7 @@ def main():
                         "mean_kills": statistics.mean(r["kills"] for r in rows),
                     }
                     print(split, name, json.dumps(out[name]), flush=True)
-                reference = "phase3" if "phase3" in groups else "phase2"
+                reference = next((name for name in ("phase4", "phase3", "phase2") if name in groups), None)
                 if "candidate" in groups and reference in groups:
                     delta = [
                         a["points"] - b["points"] for a, b in zip(groups["candidate"], groups[reference])
