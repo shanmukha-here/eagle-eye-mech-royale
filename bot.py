@@ -1,5 +1,4 @@
 """Eagle Eye entry for the mechfight/1 JSON-lines game protocol."""
-import heapq
 import json
 import math
 import os
@@ -54,10 +53,10 @@ class Bot:
         self.next_screen = 0
         self.first_contact = None
         self.firing_window = 0
-        self.remembered_attacker = None
-        self.attacker_time = -100
-        self.escape_steps = []
-        self.escape_until = self.escape_plan_at = -1
+        self.escape_contact = None
+        self.escape_seen = -100
+        self.next_exit = -1
+        self.exit_point = None
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -102,91 +101,6 @@ class Bot:
             return self.cfg["npc"]["height"] * 0.5
         scale = 1 + self.cfg["cubes"]["size_per_cube"] * actor.get("cubes", 0)
         return self.cfg["mech"]["height"] * 0.5 * scale
-
-    def _escape_path(self, obs, enemy, depth):
-        """Find a short reachable route that stays shielded beyond the first corner."""
-        arena = self.arena
-        me, zone = obs["self"], obs["zone"]
-        start = arena.nearest(me["pos"], room=me["stats"]["radius"] + 1.5)
-        if start is None:
-            return []
-        eye = (*enemy["pos"][:2], enemy["pos"][2] + self._actor_center(enemy) * 1.55)
-        ex, ey, ez = eye
-        vx, vy = enemy["vel"][:2]
-        future = (ex + vx * 0.9, ey + vy * 0.9, ez)
-        queue = [(0.0, start)]
-        parent = {start: None}
-        costs = {start: 0.0}
-        hidden = {start: 0}
-        best = None
-        checked = 0
-        while queue and checked < 155:
-            cost, node = heapq.heappop(queue)
-            if cost != costs[node]:
-                continue
-            checked += 1
-            xy = arena.points[node]
-            cell = arena.cells[node]
-            mid = (*xy, arena.floor[cell] + me["stats"]["height"] * 0.62)
-            blocked = not arena.line_open(eye, mid)
-            chain = 0
-            if blocked:
-                chain = 1 + hidden.get(parent[node], 0)
-                if node != start and chain >= depth and not arena.line_open(future, mid):
-                    # Give a corner a second protected step before accepting it.
-                    best = node
-                    break
-            hidden[node] = chain
-            for other, clearance in arena.links[node]:
-                if clearance < me["stats"]["radius"] + 1.7:
-                    continue
-                pt = arena.points[other]
-                if math.dist(pt, zone["center"]) > zone["radius"]-5:
-                    continue
-                step = math.dist(xy, pt)
-                outward = max(0, math.dist(pt, zone["next_center"])-math.dist(xy, zone["next_center"]))
-                approach = max(0, math.dist(eye[:2], xy)-math.dist(eye[:2], pt))
-                nc = cost + step*(1 if blocked else 1.35) + 0.22*outward + 0.35*approach
-                if nc < costs.get(other, math.inf):
-                    costs[other], parent[other] = nc, node
-                    heapq.heappush(queue, (nc, other))
-        if best is None:
-            return []
-        path = []
-        while best != start:
-            path.append(arena.points[best])
-            best = parent[best]
-        return path[::-1]
-
-    def _triage(self, obs, threats, urgent):
-        me, t = obs["self"], obs["t"]
-        if len(threats) > 1:
-            self.remembered_attacker = None
-            self.escape_steps = []
-            return None
-        if threats:
-            self.remembered_attacker, self.attacker_time = threats[0][0], t
-        enemy = self.remembered_attacker
-        if urgent or enemy is None or t - self.attacker_time > 6:
-            self.escape_steps = []
-            return None
-        attacked = bool(self.damage_window)
-        needs_cover = (self.mode in ("cover", "heal") or
-                       (attacked and me["hp"] < 0.77*me["max_hp"]))
-        if not needs_cover and t > self.escape_until:
-            self.escape_steps = []
-            return None
-        if t >= self.escape_plan_at:
-            self.escape_plan_at = t + 1.1
-            route = self._escape_path(obs, enemy, 2)
-            if route:
-                self.escape_steps = route
-                self.escape_until = t + 2.7
-        while self.escape_steps and math.dist(me["pos"][:2], self.escape_steps[0]) < 4:
-            self.escape_steps.pop(0)
-        if self.escape_steps:
-            return self.escape_steps[0]
-        return None
 
     def _screen(self, obs, enemy):
         me = obs["self"]
@@ -712,8 +626,8 @@ class Bot:
             weight = 0.12
         if self.mode == "standoff":
             weight = 0.23
-        if self.mode == "escaping":
-            weight = 0.05
+        if self.mode == "exit":
+            weight = 0.16
         if self.mode == "screen":
             weight = 0.12
             if goal_dist < 2:
@@ -819,8 +733,8 @@ class Bot:
             boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
-        if self.mode == "escaping" and not self.blocked_count:
-            boosting = me["grounded"] and me["energy"] > 20
+        if self.mode == "exit" and not self.blocked_count:
+            boosting = me["grounded"] and me["energy"] > 18
         if incoming_charge and not self.blocked_count and me["energy"] > 34 and me["grounded"]:
             boosting = True
         jumping = False
@@ -917,11 +831,40 @@ class Bot:
                     self.goal = p[0]+8*dx, p[1]+8*dy
                     self.mode = "screen"
                     self.plan_at = t + 0.7
-        escape = self._triage(obs, threats, urgent)
-        if escape is not None:
-            self.goal, self.mode = escape, "escaping"
-            self.plan_at = t + 0.15
-            healing = False
+        if len(threats) > 1:
+            self.escape_contact = None
+            self.exit_point = None
+        elif threats:
+            self.escape_contact = threats[0][0]
+            self.escape_seen = t
+        rival = self.escape_contact
+        if (rival and t - self.escape_seen < 12 and not urgent and me["hp"] < 0.84*me["max_hp"]
+                and self.mode in ("cover", "heal", "exit") and not (live and rival["hp"] < me["hp"]*0.6)):
+            if t >= self.next_exit or self.exit_point is None or math.dist(self.exit_point, p[:2]) < 8:
+                self.next_exit = t + 1.4
+                away = math.atan2(p[1]-rival["pos"][1], p[0]-rival["pos"][0])
+                eye = (*rival["pos"][:2], rival["pos"][2]+self._actor_center(rival)*1.55)
+                best_exit = None
+                for turn in (0, -0.6, 0.6, -1.15, 1.15, -1.57, 1.57):
+                    for length in (22, 45, 72):
+                        xy = p[0]+length*math.cos(away+turn), p[1]+length*math.sin(away+turn)
+                        c = self.arena.cell(*xy)
+                        if c is None or self.arena.clearance[c] < me["stats"]["radius"]+2:
+                            continue
+                        if math.dist(xy,zone["center"]) > zone["radius"]-8:
+                            continue
+                        covered = not self.arena.line_open(eye, (*xy,self.arena.floor[c]+me["stats"]["muzzle_height"]))
+                        gap = math.dist(xy, rival["pos"][:2]) - math.dist(p[:2],rival["pos"][:2])
+                        cost = 0.3*length - 0.7*gap - 40*covered
+                        cost += 0.6*max(0, math.dist(xy,zone["next_center"])-zone["next_radius"])
+                        if best_exit is None or cost < best_exit[0]:
+                            best_exit = cost,xy
+                self.exit_point = best_exit[1] if best_exit else None
+            if self.exit_point:
+                self.goal, self.mode = self.exit_point, "exit"
+                healing = False
+                tactical = False
+                self.plan_at = t
         if self.last_probe is None or t-self.last_probe[0] >= 1.25:
             if self.last_probe is not None and math.hypot(*self.previous_move) > 0.5 and math.dist(p[:2], self.last_probe[1][:2]) < 2.4:
                 self.blocked_count += 1
