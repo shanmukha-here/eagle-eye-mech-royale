@@ -345,13 +345,6 @@ class Bot:
             priorities = {"plating": 10, "armor": 9.5, "gun_damage": 9, "nanites": 8.5,
                           "gun_rate": 8, "gun_mag": 7.5, "servos": 7, "lightning_range": 7,
                           "laser_damage": 7, "gun_velocity": 6, "jets": 5, "sensors": 5}
-            secondary = me["weapons"][1]
-            if secondary and secondary["kind"] == "laser":
-                priorities.update(laser_damage=13, gun_damage=11, gun_rate=10.5)
-            elif secondary and secondary["kind"] == "lightning":
-                priorities.update(lightning_range=12, gun_damage=11)
-            else:
-                priorities.update(gun_damage=12, gun_rate=11)
             choices = obs["offer"]["choices"]
             if choices:
                 act["pick"] = max(range(len(choices)), key=lambda i: priorities.get(choices[i]["id"], 3))
@@ -408,6 +401,9 @@ class Bot:
             if not gun.get("reload", 0) and (ammo == 0 or (target is None and ammo <= gun["stats"]["mag"]*0.72)):
                 act["reload"] = True
         if target is None:
+            # Bank a charged laser while repositioning between observed contacts.
+            if side and side["kind"] == "laser" and not urgent and obs["t"] - self.last_contact < 4:
+                act["fire"] = [False, side.get("charge", 0) > 0 or side["cooldown"] <= 0.1]
             return
         p, q = me["pos"], target["pos"]
         vx, vy, vz = target.get("vel", (0, 0, 0))
