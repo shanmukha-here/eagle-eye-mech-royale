@@ -52,6 +52,8 @@ class Bot:
         self.escape_seen = -100
         self.next_exit = -1
         self.exit_point = None
+        self.observed_duel = frozenset()
+        self.observed_duel_until = -1
         self.previous_move = (0, 0)
 
     def _resources(self, obs):
@@ -376,6 +378,35 @@ class Bot:
                     return True
         pair, expires = self.other_fight
         return t < expires and pair <= ids
+
+    def _nearby_duel(self, obs, threats):
+        me = obs["self"]
+        nearby = {m["id"]: (m, distance) for m, distance, clear in threats
+                  if clear and distance < 160}
+        if len(nearby) < 2 or obs["alive"] <= 3 or self.damage_window:
+            return ()
+        t = obs["t"]
+        for beam in obs["beams"]:
+            if beam["by"] not in nearby or len(beam["path"]) < 2:
+                continue
+            for endpoint in beam["path"][1:]:
+                if math.dist(endpoint[:2], me["pos"][:2]) < 8:
+                    break
+                for rival, _ in nearby.values():
+                    if rival["id"] == beam["by"]:
+                        continue
+                    x, y, z = rival["pos"]
+                    if (math.hypot(x-endpoint[0],y-endpoint[1]) < 5 and
+                            z-1 <= endpoint[2] <= z+2*self._actor_center(rival)+1):
+                        self.observed_duel = frozenset((rival["id"], beam["by"]))
+                        self.observed_duel_until = t + 1.6
+        pair = self.observed_duel
+        if t < self.observed_duel_until and pair <= nearby.keys():
+            # A nearby unrelated rival remains urgent even when two others are occupied.
+            if any(i not in pair and d < 85 for i, (_, d) in nearby.items()):
+                return ()
+            return tuple(nearby[i] for i in sorted(pair))
+        return ()
 
     def _loadout(self, obs, act):
         me = obs["self"]
@@ -837,6 +868,23 @@ class Bot:
             # Complete a sight sweep during the opening without changing leg direction.
             yaw = me["aim"][0] + 0.37
         act["aim"] = [angle_delta(yaw, 0), 0]
+        duel = self._nearby_duel(obs, threats) if not urgent else ()
+        if duel and self.mode not in ("drop", "heal"):
+            gun, side = me["weapons"]
+            weakest, distance = min(duel, key=lambda contact:contact[0]["hp"])
+            can_finish = (health := me["hp"]/me["max_hp"]) >= 0.66 and (
+                distance < 94 and gun["ammo"] >= 3 and gun["reload"] <= 0
+                and weakest["hp"] < 2.8*gun["stats"]["damage"])
+            if (side and side["kind"] == "laser" and side["cooldown"] <= 0.1
+                    and health >= 0.75 and distance < 110
+                    and weakest["hp"] < side["stats"]["damage"]*0.75):
+                can_finish = True
+            if can_finish:
+                target, center = weakest, self._actor_center(weakest)
+            elif all(distance > 42 and abs(angle_delta(
+                    math.atan2(p[1]-enemy["pos"][1],p[0]-enemy["pos"][0]),enemy["aim"][0])) > 0.6
+                    for enemy, distance in duel):
+                target, center = None, 0
         self._weapons(obs, target, center, act, urgent)
         return act
 
