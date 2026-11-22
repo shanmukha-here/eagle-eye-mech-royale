@@ -874,7 +874,7 @@ class Bot:
             yaw = sounds[-1]["bearing"] if sounds else self.seed_angle + t*0.95
         if target is None and t - self.last_contact > 1:
             # Complete a sight sweep during the opening without changing leg direction.
-            yaw = me["aim"][0] + 0.37
+            yaw = me["aim"][0] + 0.5
         act["aim"] = [angle_delta(yaw, 0), 0]
         self._weapons(obs, target, center, act, urgent)
         return act
