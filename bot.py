@@ -268,7 +268,7 @@ class Bot:
                 bonus = 46 + 70*missing + 3*d["progress"]
                 add(*point, "drop", bonus, detour=True)
         if (not urgent and not retreat and obs["alive"] > 2
-                and me["hp"] > (0.8 if obs["t"] < 45 else 0.3)*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
+                and me["hp"] > (0.95 if obs["t"] < 90 else 0.3)*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
             for enemy,distance,clear in threats:
                 if not clear or not 12 < distance < 225:
                     continue
@@ -410,6 +410,8 @@ class Bot:
                 m, d = pair
                 hp = m.get("hp", self.cfg["mech"]["hp"])
                 commitment = 43 if m["id"]==self.encounter and obs["t"]<self.encounter_until else 0
+                if me["weapons"][1] and me["weapons"][1]["kind"] == "laser" and "mortar" in m.get("weapons", ()):
+                    commitment += 40
                 return (d*0.28 + hp*0.07 - commitment)
             m, _ = min(live, key=priority)
             return m, self._actor_center(m)
@@ -585,7 +587,7 @@ class Bot:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
             if not self.avoiding and len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
-            if not urgent and hp_fraction > (0.8 if t < 45 else 0.3) and d > 35:
+            if not urgent and hp_fraction > (0.95 if t < 90 else 0.3) and d > 35:
                 retreat = -2.2
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
@@ -698,7 +700,7 @@ class Bot:
         self.sprinting = me["energy"] > (reserve if self.sprinting else 90) and urgent
         boosting = self.sprinting and me["grounded"] and goal_dist > 12
         if live and not urgent and me["energy"] > 62:
-            boosting = (pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2
+            boosting = (pressured and t < 60) or ((pressured or live[0][1] < 55) and math.sin(t*2.1) > 0.2)
         if self.mode in ("laser", "lightning") and me["weapons"][1] is None and goal_dist > 7:
             boosting = bool(me["grounded"] and me["energy"] > 19 and not self.blocked_count)
         if self.mode == "exit" and not self.blocked_count:
@@ -767,10 +769,14 @@ class Bot:
                 self.last_bearing = math.atan2(live[0]["pos"][1]-p[1], live[0]["pos"][0]-p[0])
         hp_fraction = me["hp"]/me["max_hp"]
         burst = sum(amount for _, amount in self.damage_window) / me["max_hp"]
-        pressured = hp_fraction < (0.7 if t < 45 else 0.25)
+        pressured = hp_fraction < (0.9 if t < 90 else 0.25)
         mechs = [m for m, _, _ in threats]
         self.avoiding = self.surv and any(not self._prey(m, mechs) for m in live)
         if self.avoiding:
+            pressured = True
+        if hp_fraction < 0.7 and any(m.get("hp", 0) > 1.0*me["hp"] for m in live):
+            pressured = True
+        if hp_fraction < 1.01 and sum(1 for m in live if math.dist(m["pos"], p) < 1000) >= 2:
             pressured = True
         if me["weapons"][1] is None and any(
                 any(k in m.get("weapons", ()) for k in ('laser', 'lightning')) and m.get("hp", 1400) > 0.5*m.get("max_hp", 1400)
