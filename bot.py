@@ -191,7 +191,7 @@ class Bot:
                 if self.arena.clearance[cell] < me["stats"]["radius"] + 2:
                     continue
                 distance = math.dist(pos, point)
-                if distance > 280:
+                if distance > 450:
                     continue
                 return_distance = max(0, math.dist(point[:2], zone["next_center"]) - radius + 9)
                 if distance + return_distance > travel_budget:
@@ -200,7 +200,7 @@ class Bot:
                     continue
                 score = 245 - distance * 0.22 - min(35, (obs["t"] - seen) * 0.4)
                 goals.append((score, *point[:2], "laser"))
-        if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
+        if not urgent and (me["weapons"][1] is None or me["weapons"][1]["kind"] == "lightning") and obs["t"] < 80 and not pressured:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
             # Prefer reachable ground we have not passed while looking for a second weapon.
             visited_centers = [((i + 0.5) * 25, (j + 0.5) * 25) for i, j in self.searched]
@@ -257,20 +257,27 @@ class Bot:
                        for m, _, clear in threats[:3]):
                     continue
                 add(point[0], point[1], kind, values[kind]-0.7*(obs["t"]-seen), detour=True)
+        if not urgent:
             for d in obs.get("drops", ()):
                 point = d["pos"][:2]
                 eta = math.dist(pos[:2], point) * 1.35 / me["stats"]["walk_speed"]
-                if d["lands_in"] > eta+3 or d.get("holder") not in (None, me["id"]):
+                if eta > d["lands_in"] + 3:
                     continue
-                if any(math.dist(m["pos"][:2], point) < d["radius"]+16 for m, _, _ in threats):
+                if me["hp"] < 0.3*me["max_hp"] and any(clear and math.dist(m["pos"][:2], point) < d["radius"]+16
+                                                         for m, _, clear in threats):
                     continue
-                missing = max(0, 1-me["hp"]/me["max_hp"])
-                bonus = 46 + 70*missing + 3*d["progress"]
-                add(*point, "drop", bonus, detour=True)
+                if sum(1 for m, _, clear in threats if clear and math.dist(m["pos"][:2], point) < 45) >= 2:
+                    continue
+                if 0 and d["lands_in"] > 2.5 and math.dist(pos[:2], point) < 0 + 25:
+                    # Wait 0 m short of the ring on our side until it lands.
+                    ux, uy = direction(x - point[0], y - point[1])
+                    add(point[0] + ux*0, point[1] + uy*0, "stage", 300 - 0.2*eta)
+                    continue
+                add(*point, "drop", 300 + 3*d["progress"] - 0.2*eta)
         if (not urgent and not retreat and obs["alive"] > 2
-                and me["hp"] > 0.72*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
+                and me["hp"] > 0.3*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
             for enemy,distance,clear in threats:
-                if not clear or not 12 < distance < 155:
+                if not clear or not 12 < distance < 225:
                     continue
                 enemy_hp = enemy.get("hp", self.cfg["mech"]["hp"])
                 confidence = me["hp"]/max(enemy_hp,1)
@@ -279,14 +286,14 @@ class Bot:
                 endgame = self.uncredited_eliminations >= 1 and not self.surv and enemy_hp < 0.6*enemy.get("max_hp", self.cfg["mech"]["hp"])
                 if self.surv and not self._prey(enemy, [m for m, _, _ in threats]):
                     continue
-                if (crowd and not endgame) or (confidence < 0.84 and not endgame):
+                if False:
                     continue
                 facing = math.atan2(y-enemy["pos"][1], x-enemy["pos"][0])
                 looking_away = abs(angle_delta(facing,enemy["aim"][0])) > 1.15
-                if not (looking_away or confidence > 1.20 or me["weapons"][1]):
+                if False:
                     continue
                 stamina = 15 if enemy["id"] == self.encounter and obs["t"] < self.encounter_until else 0
-                bonus = 54 + min(24, max(0,confidence-1)*25) + 14*looking_away + stamina
+                bonus = 120 + min(24, max(0,confidence-1)*25) + 14*looking_away + stamina
                 bonus += 30*endgame
                 px,py = enemy["pos"][:2]
                 dx,dy = direction(x-px,y-py)
@@ -583,6 +590,8 @@ class Bot:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
             if not self.avoiding and len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
+            if not urgent and hp_fraction > 0.3 and d > 35:
+                retreat = -2.2
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
@@ -602,14 +611,15 @@ class Bot:
             weight = 0.16
         if self.mode == "cover" and not endpoint:
             weight = 0.45
-        if self.mode == "drop" and not urgent and not pressured:
+        if self.mode == "drop" and not urgent:
             # Stay in the capture ring. A full repair needs four continuous seconds.
             for d in obs.get("drops", ()):
                 if (d["lands_in"] == 0 and math.dist(self.goal, d["pos"][:2]) < 1
                         and goal_dist <= d["radius"]):
-                    if goal_dist > d["radius"]*0.45:
+                    if goal_dist > d["radius"]*0.5:
                         return direct, False, False
-                    return (0, 0), False, False
+                    if not live and not obs["projectiles"]:
+                        return (0, 0), False, False
         if zone["radius"] <= 5 and zone["next_radius"] == 0:
             weight = 0
         path_scale = 0.0 if endpoint else 1.0
@@ -763,7 +773,7 @@ class Bot:
                 self.last_bearing = math.atan2(live[0]["pos"][1]-p[1], live[0]["pos"][0]-p[0])
         hp_fraction = me["hp"]/me["max_hp"]
         burst = sum(amount for _, amount in self.damage_window) / me["max_hp"]
-        pressured = len(live) >= 2 or hp_fraction < 0.57 or (hp_fraction < 0.88 and burst > 0.19)
+        pressured = hp_fraction < 0.25
         mechs = [m for m, _, _ in threats]
         self.avoiding = self.surv and any(not self._prey(m, mechs) for m in live)
         if self.avoiding:
@@ -782,6 +792,9 @@ class Bot:
         healing = (not loot_near and (not live or separate_fight) and not urgent and me["in_zone"] and outside_next < -4
                    and hp_fraction < 0.93 and (t < self.recover_until or separate_fight)
                    and t-self.last_drone[1] > 2)
+        if healing and any(math.dist(p[:2], d["pos"][:2]) * 1.35 / me["stats"]["walk_speed"] <= d["lands_in"] + 15
+                           for d in obs.get("drops", ())):
+            healing = False
         # Prefer a safe, ongoing capture to a slower natural repair.
         if healing and any(d.get("holder") == me["id"] for d in obs.get("drops", ())):
             healing = False
