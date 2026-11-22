@@ -410,7 +410,7 @@ class Bot:
                 m, d = pair
                 hp = m.get("hp", self.cfg["mech"]["hp"])
                 commitment = 43 if m["id"]==self.encounter and obs["t"]<self.encounter_until else 0
-                return (d*0.28 + hp*0.07 - commitment)
+                return (d*0.28 + hp*0.07 - commitment - (320 if m.get("hp", 1e9) < 0.35*m.get("max_hp", self.cfg["mech"]["hp"]) else 0))
             m, _ = min(live, key=priority)
             return m, self._actor_center(m)
         if not urgent:
@@ -559,6 +559,10 @@ class Bot:
         endpoint = goal_dist < (3 if self.mode in ("cube", "laser", "lightning") else 5)
         endpoint = endpoint and goal_dist < max(0.03, zone["next_radius"]*0.1)
         live = [(m,d) for m,d,clear in threats if clear]
+        low = [x for x in live if x[1] < 220 and x[0].get("hp", 1e9) < 0.35*x[0].get("max_hp", self.cfg["mech"]["hp"])]
+        chase = bool(low) and not urgent and me["hp"] > 0.3*me["max_hp"]
+        if chase:
+            live = [low[0]] + [x for x in live if x is not low[0]]
         evade = (0, 0)
         if live:
             m, d = live[0]
@@ -587,6 +591,8 @@ class Bot:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
             if not urgent and hp_fraction > (0.8 if t < 45 else 0.3) and d > 35:
                 retreat = -2.2
+            if chase and d > 10:
+                retreat = -2.6
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
@@ -600,6 +606,8 @@ class Bot:
             weight = 0.12
         if self.mode == "skirt" and goal_dist > 9 and not urgent:
             weight = 0.38 if not pressured else 0.62
+        if chase:
+            weight = 1.6
         if self.mode=="duel" and not urgent and not pressured:
             weight = 0.42 if goal_dist > 15 else 0.95
         if self.mode == "exit":
@@ -817,6 +825,10 @@ class Bot:
                         and math.dist((gx, gy), zone["next_center"]) < zone["next_radius"] - 15):
                     self.goal, self.mode = (gx, gy), "patrol"
                     break
+        lowseen = [m for m, d, clear in threats if not clear and d < 220 and m.get("hp", 1e9) < 0.35*m.get("max_hp", self.cfg["mech"]["hp"])]
+        if lowseen and not live and not urgent and hp_fraction > 0.35:
+            self.goal, self.mode = tuple(lowseen[0]["pos"][:2]), "chase"
+            healing = False
         if len(threats) > 1:
             self.escape_contact = None
             self.exit_point = None
