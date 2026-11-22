@@ -270,7 +270,7 @@ class Bot:
         if (not urgent and not retreat and obs["alive"] > 2
                 and me["hp"] > 0.72*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
             for enemy,distance,clear in threats:
-                if not clear or not 12 < distance < 155:
+                if not clear or not 12 < distance < 225:
                     continue
                 enemy_hp = enemy.get("hp", self.cfg["mech"]["hp"])
                 confidence = me["hp"]/max(enemy_hp,1)
@@ -290,7 +290,7 @@ class Bot:
                 bonus += 30*endgame
                 px,py = enemy["pos"][:2]
                 dx,dy = direction(x-px,y-py)
-                spacing = 22 if me["weapons"][1] else 32
+                spacing = 165
                 add(px+dx*spacing,py+dy*spacing,"duel",bonus,detour=True)
         if not urgent and radius >= 40 and self.uncredited_eliminations >= 1:
             goals.extend(self._perimeter_goals(obs, threats))
@@ -583,6 +583,8 @@ class Bot:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
             if not self.avoiding and len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
+            if not urgent:
+                retreat = 1.2 if d < 135 else (-0.7 if d > 195 else 0.0)
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
