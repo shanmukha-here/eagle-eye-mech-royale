@@ -764,6 +764,8 @@ class Bot:
         hp_fraction = me["hp"]/me["max_hp"]
         burst = sum(amount for _, amount in self.damage_window) / me["max_hp"]
         pressured = len(live) >= 2 or hp_fraction < 0.57 or (hp_fraction < 0.88 and burst > 0.19)
+        if live and self.damage_window and t - self.damage_window[-1][0] < 1.5:
+            pressured = True
         mechs = [m for m, _, _ in threats]
         self.avoiding = self.surv and any(not self._prey(m, mechs) for m in live)
         if self.avoiding:
