@@ -772,6 +772,8 @@ class Bot:
         self.avoiding = self.surv and any(not self._prey(m, mechs) for m in live)
         if self.avoiding:
             pressured = True
+        if hp_fraction < 1.01 and sum(1 for m in live if math.dist(m["pos"], p) < 120) >= 2:
+            pressured = True
         if me["weapons"][1] is None and any(
                 any(k in m.get("weapons", ()) for k in ('laser', 'lightning')) and m.get("hp", 1400) > 0.5*m.get("max_hp", 1400)
                 for m in live):
