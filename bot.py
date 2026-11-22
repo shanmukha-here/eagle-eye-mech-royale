@@ -294,6 +294,14 @@ class Bot:
                 add(px+dx*spacing,py+dy*spacing,"duel",bonus,detour=True)
         if not urgent and radius >= 40 and self.uncredited_eliminations >= 1:
             goals.extend(self._perimeter_goals(obs, threats))
+        if not urgent and obs["t"] > 40 and zone["next_radius"] > 0:
+            goals = [g for g in goals if g[3] not in ("duel", "explore", "search", "skirt", "harvest", "drone")]
+            spot = self._camp_point(obs)
+            if spot:
+                gap = math.hypot(spot[0]-cx, spot[1]-cy) - safe_radius
+                if gap <= 0:
+                    near = math.hypot(spot[0]-x, spot[1]-y)
+                    goals.append(((20 if retreat else 70) - 0.12*near, spot[0], spot[1], "camp"))
         if goals:
             _, gx, gy, self.mode = max(goals)
             self.goal = (gx, gy)
@@ -304,6 +312,39 @@ class Bot:
                     self.encounter, self.encounter_until = enemy["id"], obs["t"]+2.5
         else:
             self.goal, self.mode = (cx, cy), "zone"
+
+    def _camp_point(self, obs):
+        """A reachable spot near the next circle's center with walls close by (few open sight lines)."""
+        zone, me = obs["zone"], obs["self"]
+        key = (round(zone["next_center"][0]), round(zone["next_center"][1]), zone["next_radius"])
+        if getattr(self, "camp_key", None) == key:
+            return self.camp_spot
+        self.camp_key = key
+        cx, cy = zone["next_center"]
+        reach = max(8, min(90, zone["next_radius"]*0.45))
+        best = None
+        for ring in (0.0, 0.35, 0.7, 1.0):
+            n = 1 if ring == 0 else 12
+            for k in range(n):
+                angle = self.seed_angle + k*math.tau/n
+                px, py = cx + ring*reach*math.cos(angle), cy + ring*reach*math.sin(angle)
+                cell = self.arena.cell(px, py)
+                if cell is None:
+                    continue
+                room = self.arena.clearance[cell]
+                if room < me["stats"]["radius"] + 2.5:
+                    continue
+                eye = (px, py, self.arena.floor[cell] + me["stats"]["eye_height"])
+                blocked = 0
+                for j in range(8):
+                    a = j*math.pi/4
+                    if not self.arena.line_open(eye, (px+40*math.cos(a), py+40*math.sin(a), eye[2])):
+                        blocked += 1
+                score = blocked*3 - abs(room-8)*0.4 - ring*4
+                if best is None or score > best[0]:
+                    best = (score, px, py)
+        self.camp_spot = best[1:] if best else None
+        return self.camp_spot
 
     def _perimeter_goals(self, obs, threats):
         """Sample reachable points on the quiet side of the current circle."""
@@ -600,6 +641,8 @@ class Bot:
             weight = 0.42 if goal_dist > 15 else 0.95
         if self.mode == "exit":
             weight = 0.16
+        if self.mode == "camp" and goal_dist < 15 and not urgent:
+            weight = 0.5
         if self.mode == "cover" and not endpoint:
             weight = 0.45
         if self.mode == "drop" and not urgent and not pressured:
