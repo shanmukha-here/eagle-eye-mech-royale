@@ -807,8 +807,8 @@ class Bot:
             self._choose_goal(obs, threats, pressured, urgent)
             self.plan_state = state
             self.plan_at = t + (0.8 if pressured or urgent else 1.4)
-        if (self.mode in ('zone', 'skirt') and not live and not urgent and not healing and hp_fraction > 0.7
-                and me["weapons"][1] and t - self.last_contact > 4):
+        if (self.mode in ('zone', 'skirt', 'explore', 'search') and not live and not urgent and not healing and hp_fraction > 0.7
+                and t - self.last_contact > 4):
             for k in range(6):
                 hd = self.seed_angle + (int(t / 8) + k) * 2.4
                 gx, gy = p[0] + 60*math.cos(hd), p[1] + 60*math.sin(hd)
