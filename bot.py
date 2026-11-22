@@ -257,16 +257,18 @@ class Bot:
                        for m, _, clear in threats[:3]):
                     continue
                 add(point[0], point[1], kind, values[kind]-0.7*(obs["t"]-seen), detour=True)
+        if not urgent:
             for d in obs.get("drops", ()):
                 point = d["pos"][:2]
                 eta = math.dist(pos[:2], point) * 1.35 / me["stats"]["walk_speed"]
-                if d["lands_in"] > eta+3 or d.get("holder") not in (None, me["id"]):
+                if eta > d["lands_in"] + 15:
                     continue
-                if any(math.dist(m["pos"][:2], point) < d["radius"]+16 for m, _, _ in threats):
+                if me["hp"] < 0.3*me["max_hp"] and any(clear and math.dist(m["pos"][:2], point) < d["radius"]+16
+                                                         for m, _, clear in threats):
                     continue
-                missing = max(0, 1-me["hp"]/me["max_hp"])
-                bonus = 46 + 70*missing + 3*d["progress"]
-                add(*point, "drop", bonus, detour=True)
+                if sum(1 for m, _, clear in threats if clear and math.dist(m["pos"][:2], point) < 45) >= 99:
+                    continue
+                add(*point, "drop", 300 + 3*d["progress"] - 0.2*eta)
         if (not urgent and not retreat and obs["alive"] > 2
                 and me["hp"] > 0.72*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
             for enemy,distance,clear in threats:
@@ -602,14 +604,15 @@ class Bot:
             weight = 0.16
         if self.mode == "cover" and not endpoint:
             weight = 0.45
-        if self.mode == "drop" and not urgent and not pressured:
+        if self.mode == "drop" and not urgent:
             # Stay in the capture ring. A full repair needs four continuous seconds.
             for d in obs.get("drops", ()):
                 if (d["lands_in"] == 0 and math.dist(self.goal, d["pos"][:2]) < 1
                         and goal_dist <= d["radius"]):
-                    if goal_dist > d["radius"]*0.45:
+                    if goal_dist > d["radius"]*0.5:
                         return direct, False, False
-                    return (0, 0), False, False
+                    if not live and not obs["projectiles"]:
+                        return (0, 0), False, False
         if zone["radius"] <= 5 and zone["next_radius"] == 0:
             weight = 0
         path_scale = 0.0 if endpoint else 1.0
@@ -782,6 +785,9 @@ class Bot:
         healing = (not loot_near and (not live or separate_fight) and not urgent and me["in_zone"] and outside_next < -4
                    and hp_fraction < 0.93 and (t < self.recover_until or separate_fight)
                    and t-self.last_drone[1] > 2)
+        if healing and any(math.dist(p[:2], d["pos"][:2]) * 1.35 / me["stats"]["walk_speed"] <= d["lands_in"] + 15
+                           for d in obs.get("drops", ())):
+            healing = False
         # Prefer a safe, ongoing capture to a slower natural repair.
         if healing and any(d.get("holder") == me["id"] for d in obs.get("drops", ())):
             healing = False
