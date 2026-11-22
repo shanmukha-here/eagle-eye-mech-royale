@@ -268,9 +268,9 @@ class Bot:
                 bonus = 46 + 70*missing + 3*d["progress"]
                 add(*point, "drop", bonus, detour=True)
         if (not urgent and not retreat and obs["alive"] > 2
-                and me["hp"] > 0.72*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
+                and me["hp"] > 0.3*me["max_hp"] and obs["t"]-self.last_drone[1]>1.5):
             for enemy,distance,clear in threats:
-                if not clear or not 12 < distance < 155:
+                if not clear or not 12 < distance < 225:
                     continue
                 enemy_hp = enemy.get("hp", self.cfg["mech"]["hp"])
                 confidence = me["hp"]/max(enemy_hp,1)
@@ -279,14 +279,14 @@ class Bot:
                 endgame = self.uncredited_eliminations >= 1 and not self.surv and enemy_hp < 0.6*enemy.get("max_hp", self.cfg["mech"]["hp"])
                 if self.surv and not self._prey(enemy, [m for m, _, _ in threats]):
                     continue
-                if (crowd and not endgame) or (confidence < 0.84 and not endgame):
+                if False:
                     continue
                 facing = math.atan2(y-enemy["pos"][1], x-enemy["pos"][0])
                 looking_away = abs(angle_delta(facing,enemy["aim"][0])) > 1.15
-                if not (looking_away or confidence > 1.20 or me["weapons"][1]):
+                if False:
                     continue
                 stamina = 15 if enemy["id"] == self.encounter and obs["t"] < self.encounter_until else 0
-                bonus = 54 + min(24, max(0,confidence-1)*25) + 14*looking_away + stamina
+                bonus = 120 + min(24, max(0,confidence-1)*25) + 14*looking_away + stamina
                 bonus += 30*endgame
                 px,py = enemy["pos"][:2]
                 dx,dy = direction(x-px,y-py)
@@ -583,6 +583,8 @@ class Bot:
                 side = 1 if math.sin(t * 4.8 + self.seed_angle) > 0 else -1
             if not self.avoiding and len(live) == 1 and not urgent and hp_fraction > 0.60 and d > 31 and not secondary:
                 retreat = -2.5 if m.get("hp", 1400) < me["hp"] * 1.15 else -0.5
+            if not urgent and hp_fraction > 0.3 and d > 35:
+                retreat = -2.2
             evade = direction(rx*retreat-side*ry, ry*retreat+side*rx)
         if endpoint and not live and not obs["projectiles"]:
             return (0, 0), False, False
@@ -763,7 +765,7 @@ class Bot:
                 self.last_bearing = math.atan2(live[0]["pos"][1]-p[1], live[0]["pos"][0]-p[0])
         hp_fraction = me["hp"]/me["max_hp"]
         burst = sum(amount for _, amount in self.damage_window) / me["max_hp"]
-        pressured = len(live) >= 2 or hp_fraction < 0.57 or (hp_fraction < 0.88 and burst > 0.19)
+        pressured = hp_fraction < 0.25
         mechs = [m for m, _, _ in threats]
         self.avoiding = self.surv and any(not self._prey(m, mechs) for m in live)
         if self.avoiding:
