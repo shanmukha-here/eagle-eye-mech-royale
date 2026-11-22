@@ -737,7 +737,7 @@ class Bot:
         p = me["pos"]
         self.mech_kills += sum(e["type"] == "kill" and 0 <= e["target"] < 16 for e in obs["events"])
         self.uncredited_eliminations = max(0, 16 - obs["alive"] - self.mech_kills)
-        self.surv = self.uncredited_eliminations >= 1 and obs["alive"] > 3
+        self.surv = obs["alive"] > 3
         self.charge_since = {
             m["id"]: self.charge_since.get(m["id"], t) for m in obs["mechs"] if m.get("charging")
         }
