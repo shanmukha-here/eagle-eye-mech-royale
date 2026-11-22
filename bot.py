@@ -222,7 +222,7 @@ class Bot:
                     score = 86 + min(95, novelty) * 0.23 - distance * 0.06
                     score += min(24, self.arena.clearance[cell]) * 0.18 + keep_goal
                     goals.append((score, px, py, "explore"))
-        self.farming = (self.uncredited_eliminations >= 1 and not urgent and not threats and obs["t"] - self.last_contact > 4
+        self.farming = (True and not urgent and not threats and obs["t"] - self.last_contact > 4
                         and obs["t"] < 140 and me["hp"] >= 0.7*me["max_hp"] and me["cubes"] < 10)
         if self.farming:
             # Before the first fight, nearby crates and drones are the cheapest cubes,
@@ -372,9 +372,9 @@ class Bot:
     def _loadout(self, obs, act):
         me = obs["self"]
         if obs["offer"]:
-            priorities = {"plating": 10, "armor": 9.5, "gun_damage": 9, "nanites": 8.5,
-                          "gun_rate": 8, "gun_mag": 7.5, "servos": 7, "lightning_range": 7,
-                          "laser_damage": 7, "gun_velocity": 6, "jets": 5, "sensors": 5}
+            priorities = {"laser_charge": 10.5, "laser_damage": 10.4, "lightning_efficiency": 10.3,
+                          "lightning_range": 10.2, "plating": 10, "armor": 9.5, "gun_damage": 9, "gun_mag": 8.8,
+                          "nanites": 8.5, "gun_rate": 8, "servos": 7, "gun_velocity": 6, "jets": 5, "sensors": 5}
             choices = obs["offer"]["choices"]
             if choices:
                 act["pick"] = max(range(len(choices)), key=lambda i: priorities.get(choices[i]["id"], 3))
