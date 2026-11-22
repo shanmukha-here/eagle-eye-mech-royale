@@ -179,11 +179,11 @@ class Bot:
             for point, kind, seen in self.loot.values():
                 if kind in ("laser", "lightning") and abs(point[2] - pos[2]) <= 4 and math.dist(pos, point) < 140:
                     add(*point[:2], kind, 155 - 2 * (obs["t"] - seen), detour=True)
-        if not urgent and (me["weapons"][1] is None or me["weapons"][1]["kind"] == "lightning"):
+        if not urgent and (me["weapons"][1] is None or me["weapons"][1]["kind"] == "laser"):
             # The destination may be at a different ground elevation from our feet.
             travel_budget = (zone["shrink_end"] - obs["t"] - 8) * me["stats"]["walk_speed"] / 1.65
             for point, kind, seen in self.loot.values():
-                if kind != "laser":
+                if kind != "lightning":
                     continue
                 cell = self.arena.cell(*point[:2])
                 if cell is None or abs(self.arena.floor[cell] - point[2]) > 4:
@@ -199,7 +199,7 @@ class Bot:
                 if math.dist(point[:2], zone["center"]) > zone["radius"] - 6:
                     continue
                 score = 245 - distance * 0.22 - min(35, (obs["t"] - seen) * 0.4)
-                goals.append((score, *point[:2], "laser"))
+                goals.append((score, *point[:2], "lightning"))
         if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
             # Prefer reachable ground we have not passed while looking for a second weapon.
@@ -373,14 +373,14 @@ class Bot:
         me = obs["self"]
         if obs["offer"]:
             priorities = {"plating": 10, "armor": 9.5, "gun_damage": 9, "nanites": 8.5,
-                          "gun_rate": 8, "gun_mag": 7.5, "servos": 7, "lightning_range": 7,
+                          "gun_rate": 8, "gun_mag": 7.5, "servos": 7, "lightning_range": 9.7,
                           "laser_damage": 7, "gun_velocity": 6, "jets": 5, "sensors": 5}
             choices = obs["offer"]["choices"]
             if choices:
                 act["pick"] = max(range(len(choices)), key=lambda i: priorities.get(choices[i]["id"], 3))
-        if me["weapons"][1] and me["weapons"][1]["kind"] == "lightning":
+        if me["weapons"][1] and me["weapons"][1]["kind"] == "laser":
             for item in obs["pickups"]:
-                if item["kind"] == "laser" and math.dist(me["pos"], item["pos"]) < self.cfg["loot"]["pickup_radius"]:
+                if item["kind"] == "lightning" and math.dist(me["pos"], item["pos"]) < self.cfg["loot"]["pickup_radius"]:
                     act["drop"] = 1
                     act["take"] = item["id"]
                     break
