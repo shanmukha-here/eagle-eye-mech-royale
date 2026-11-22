@@ -165,7 +165,7 @@ class Bot:
                 for i in range(8):
                     angle = i*math.pi/4
                     add(x+dist*math.cos(angle), y+dist*math.sin(angle), "cover", 12)
-        if (not threats and not urgent and obs["t"]-self.last_contact > 6
+        if (False and not threats and not urgent and obs["t"]-self.last_contact > 6
                 and obs["t"] < 90 and me["hp"] > 0.85*me["max_hp"] and radius >= 140
                 and (me["weapons"][1] is None or me["cubes"] < 2)
                 and math.hypot(x-cx, y-cy) < safe_radius-45):
@@ -200,7 +200,7 @@ class Bot:
                     continue
                 score = 245 - distance * 0.22 - min(35, (obs["t"] - seen) * 0.4)
                 goals.append((score, *point[:2], "laser"))
-        if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
+        if False:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
             # Prefer reachable ground we have not passed while looking for a second weapon.
             visited_centers = [((i + 0.5) * 25, (j + 0.5) * 25) for i, j in self.searched]
@@ -372,9 +372,9 @@ class Bot:
     def _loadout(self, obs, act):
         me = obs["self"]
         if obs["offer"]:
-            priorities = {"plating": 10, "armor": 9.5, "gun_damage": 9, "nanites": 8.5,
-                          "gun_rate": 8, "gun_mag": 7.5, "servos": 7, "lightning_range": 7,
-                          "laser_damage": 7, "gun_velocity": 6, "jets": 5, "sensors": 5}
+            priorities = {"gun_damage": 10, "gun_rate": 9.8, "plating": 9.5, "armor": 9.3, "gun_mag": 9,
+                          "nanites": 8.5, "laser_damage": 8, "laser_charge": 7.8, "lightning_efficiency": 7.5,
+                          "lightning_range": 7, "servos": 6, "gun_velocity": 6, "jets": 5, "sensors": 5}
             choices = obs["offer"]["choices"]
             if choices:
                 act["pick"] = max(range(len(choices)), key=lambda i: priorities.get(choices[i]["id"], 3))
