@@ -191,7 +191,7 @@ class Bot:
                 if self.arena.clearance[cell] < me["stats"]["radius"] + 2:
                     continue
                 distance = math.dist(pos, point)
-                if distance > 280:
+                if distance > 450:
                     continue
                 return_distance = max(0, math.dist(point[:2], zone["next_center"]) - radius + 9)
                 if distance + return_distance > travel_budget:
@@ -200,7 +200,7 @@ class Bot:
                     continue
                 score = 245 - distance * 0.22 - min(35, (obs["t"] - seen) * 0.4)
                 goals.append((score, *point[:2], "laser"))
-        if not urgent and me["weapons"][1] is None and obs["t"] < 45 and not pressured:
+        if not urgent and (me["weapons"][1] is None or me["weapons"][1]["kind"] == "lightning") and obs["t"] < 80 and not pressured:
             seconds_left = zone["shrink_end"] - obs["t"] - 9
             # Prefer reachable ground we have not passed while looking for a second weapon.
             visited_centers = [((i + 0.5) * 25, (j + 0.5) * 25) for i, j in self.searched]
