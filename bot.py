@@ -151,7 +151,7 @@ class Bot:
             goals.append((score, px, py, mode))
 
         dx, dy = direction(x-cx, y-cy)
-        inset = min(safe_radius*0.76, math.hypot(x-cx, y-cy))
+        inset = min(safe_radius*(0.3 if obs["t"] > 60 else 0.76), math.hypot(x-cx, y-cy))
         ax, ay = cx+dx*inset, cy+dy*inset
         add(ax, ay, "zone", 10)
         if safe_radius > 0:
