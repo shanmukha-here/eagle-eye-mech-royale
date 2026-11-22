@@ -863,6 +863,8 @@ class Bot:
             move, boost, jump = (0, 0), False, False
         else:
             move, boost, jump = self._move(obs, threats, urgent, pressured)
+            if self.mode in ('patrol',) and not live and me["energy"] > 60 and math.hypot(*move) > 0.5:
+                boost = True
         self.previous_move = move
         act = {"tick": obs["tick"], "move": move, "boost": boost, "jump": jump}
         self._loadout(obs, act)
